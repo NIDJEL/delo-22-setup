@@ -3,12 +3,15 @@ param(
     [string]$SourceFolder,
     [uri]$ArchiveUrl,
     [string]$InstallerDirectory = $PSScriptRoot,
+    [string]$InstallerPath = (Join-Path $PSScriptRoot 'Start-Delo-Setup.cmd'),
     [switch]$Install,
     [switch]$Uninstall,
+    [switch]$Menu,
     [switch]$Check,
     [switch]$DownloadOnly,
     [switch]$ManualWizard,
     [switch]$Credentials,
+    [switch]$ResumeAfterRestart,
     [switch]$CopyPassword
 )
 
@@ -263,6 +266,10 @@ function Enable-WindowsFeatureSet([string[]]$Names) {
 function Install-Net35 {
     $build = [int](Get-CimInstance -ClassName Win32_OperatingSystem).BuildNumber
     if ($build -lt 28000) {
+        if (!(Get-WindowsOptionalFeature -Online -FeatureName 'NetFx3')) {
+            Write-Step 'В этом образе Windows компонент NetFx3 недоступен. Продолжаю установку настольного ДЕЛО.'
+            return $false
+        }
         return (Enable-WindowsFeatureSet 'NetFx3')
     }
     $runtime = Join-Path $env:SystemRoot 'Microsoft.NET\Framework\v2.0.50727\mscorwks.dll'
@@ -373,10 +380,49 @@ function Test-ClientReady {
         $config -match ('(?im)^(?:Owner|DBOwner)=' + [regex]::Escape($owner) + '\s*$')
 }
 
+function Get-SetupResumeTaskName {
+    'Delo22Lab.Setup.Resume.' + [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+}
+
+function Clear-SetupResume {
+    $name = Get-SetupResumeTaskName
+    if (Get-ScheduledTask -TaskPath '\' -TaskName $name -ErrorAction SilentlyContinue) {
+        Unregister-ScheduledTask -TaskPath '\' -TaskName $name -Confirm:$false
+    }
+    $pending = Join-Path $stateRoot 'pending-restart.txt'
+    if (Test-Path -LiteralPath $pending) { Remove-Item -LiteralPath $pending }
+}
+
 function Require-Restart {
-    $launcher = if ($InstallerDirectory) { 'Delo-Setup.exe' } else { 'Start-Delo-Setup.cmd' }
-    Write-Step "Перезагрузите Windows и снова запустите $launcher. Установленные компоненты и скачанные файлы сохранятся."
-    if ($Uninstall) { Write-Host 'После перезагрузки выберите «Удалить ДЕЛО».' }
+    if ($Uninstall) {
+        Write-Step 'Windows требуется перезагрузка. После неё откройте управление ДЕЛО и снова выберите удаление.'
+        exit 3010
+    }
+
+    $account = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+    $launcher = (Resolve-Path -LiteralPath $InstallerPath).ProviderPath
+    $arguments = @('-Install', '-ResumeAfterRestart')
+    if ($SourceFolder) { $arguments += @('-SourceFolder', ('"' + (Resolve-Path -LiteralPath $SourceFolder).Path + '"')) }
+    if ($ArchiveUrl) { $arguments += @('-ArchiveUrl', ('"' + $ArchiveUrl.AbsoluteUri + '"')) }
+    if ($ManualWizard) { $arguments += '-ManualWizard' }
+    if ([IO.Path]::GetExtension($launcher) -ieq '.cmd') {
+        $arguments = @('-NoProfile', '-ExecutionPolicy', 'RemoteSigned', '-File', ('"' + $PSCommandPath + '"')) + $arguments
+        $launcher = Join-Path $PSHOME 'powershell.exe'
+    }
+    $action = New-ScheduledTaskAction -Execute $launcher -Argument ($arguments -join ' ') -WorkingDirectory $InstallerDirectory
+    $trigger = New-ScheduledTaskTrigger -AtLogOn -User $account
+    $principal = New-ScheduledTaskPrincipal -UserId $account -LogonType Interactive -RunLevel Highest
+    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
+    $boot = (Get-CimInstance -ClassName Win32_OperatingSystem).LastBootUpTime.ToUniversalTime().Ticks
+    Register-ScheduledTask -TaskPath '\' -TaskName (Get-SetupResumeTaskName) -Action $action -Trigger $trigger `
+        -Principal $principal -Settings $settings -Force | Out-Null
+    try {
+        Set-Content -LiteralPath (Join-Path $stateRoot 'pending-restart.txt') -Value $boot -Encoding ASCII
+    } catch {
+        Clear-SetupResume
+        throw
+    }
+    Write-Step 'Windows требуется перезагрузка. Установка автоматически продолжится после входа в этот профиль.'
     exit 3010
 }
 
@@ -457,21 +503,33 @@ function Save-DesktopCredentials([pscredential]$Admin) {
     $credentials
 }
 
-function Save-DesktopFiles([string]$ProgramsFolder, [pscredential]$Admin) {
-    $null = Save-DesktopCredentials $Admin
+function Save-AdjacentShortcut([string]$Name, [string]$Target, [string]$Arguments, [string]$Description) {
     $shell = New-Object -ComObject WScript.Shell
-    $shortcut = Get-AdjacentOutputPath 'Дело.lnk' {
+    $shortcut = Get-AdjacentOutputPath $Name {
         param($path)
-        try { $shell.CreateShortcut($path).TargetPath -ieq $ProgramsFolder } catch { $false }
+        try {
+            $existing = $shell.CreateShortcut($path)
+            $existing.TargetPath -ieq $Target -and $existing.Arguments -ceq $Arguments
+        } catch { $false }
     }
     if (!(Test-Path -LiteralPath $shortcut)) {
         $link = $shell.CreateShortcut($shortcut)
-        $link.TargetPath = $ProgramsFolder
-        $link.WorkingDirectory = $ProgramsFolder
-        $link.Description = 'Настольные модули ДЕЛО'
+        $link.TargetPath = $Target
+        if ($Arguments) { $link.Arguments = $Arguments }
+        $link.WorkingDirectory = if (Test-Path -LiteralPath $Target -PathType Container) { $Target } else { Split-Path $Target -Parent }
+        $link.Description = $Description
         $link.Save()
     }
+    $shortcut
+}
+
+function Save-DesktopFiles([string]$ProgramsFolder, [pscredential]$Admin) {
+    $null = Save-DesktopCredentials $Admin
+    $shortcut = Save-AdjacentShortcut 'Дело.lnk' $ProgramsFolder '' 'Настольные модули ДЕЛО'
     Write-Step "Ярлык на настольные модули сохранён в файле $shortcut"
+    if (Test-Path -LiteralPath $InstallerPath -PathType Leaf) {
+        $null = Save-AdjacentShortcut 'Дело - управление.lnk' $InstallerPath '-Menu' 'Управление учебной установкой ДЕЛО 22.2'
+    }
 }
 
 function Show-Preflight {
@@ -489,8 +547,7 @@ function Show-Preflight {
 }
 
 function Invoke-DeloSetup {
-    if (!$Install -and !$Uninstall -and !$Check -and !$DownloadOnly -and
-        !$ManualWizard -and !$SourceFolder -and !$ArchiveUrl -and !$Credentials -and !$CopyPassword) {
+    if ($Menu) {
         Write-Host 'ДЕЛО 22.2'
         Write-Host '1. Установить или продолжить'
         Write-Host '2. Удалить ДЕЛО и скачанные файлы'
@@ -498,7 +555,8 @@ function Invoke-DeloSetup {
         $choice = ([string](Read-Host 'Введите 1, 2 или 3')).Trim()
         if ($choice -eq '2') { $Uninstall = $true }
         elseif ($choice -eq '3') { $Credentials = $true }
-        elseif ($choice -notin '', '1') { return }
+        elseif ($choice -eq '1') { $Install = $true }
+        else { return }
     }
     if ($Install -and $Uninstall) { throw 'Выберите одну операцию.' }
     if ($Credentials -or $CopyPassword) {
@@ -534,7 +592,9 @@ function Invoke-DeloSetup {
         if ($SourceFolder) { $arguments += @('-SourceFolder', ('"' + (Resolve-Path -LiteralPath $SourceFolder).Path + '"')) }
         if ($ArchiveUrl) { $arguments += @('-ArchiveUrl', ('"' + $ArchiveUrl.AbsoluteUri + '"')) }
         if ($InstallerDirectory) { $arguments += @('-InstallerDirectory', ('"' + $InstallerDirectory + '"')) }
+        if ($InstallerPath) { $arguments += @('-InstallerPath', ('"' + $InstallerPath + '"')) }
         if ($ManualWizard) { $arguments += '-ManualWizard' }
+        if ($ResumeAfterRestart) { $arguments += '-ResumeAfterRestart' }
         if ($Uninstall) { $arguments += '-Uninstall' } else { $arguments += '-Install' }
         $child = Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') -Verb RunAs -ArgumentList $arguments -Wait -PassThru
         exit $child.ExitCode
@@ -550,12 +610,17 @@ function Invoke-DeloSetup {
             Invoke-DeloUninstall
             return
         }
-        $consent = Join-Path $stateRoot 'accepted'
-        if (!(Test-Path -LiteralPath $consent)) {
-            Write-Host 'Учебная установка ДЕЛО 22.2 и Microsoft SQL Server 2019 Express.'
-            $answer = [string](Read-Host 'Принять условия установщиков и продолжить? Введите YES')
-            if ($answer.Trim() -ne 'YES') { return }
-            New-Item -Path $consent -ItemType File -Force | Out-Null
+        $pending = Join-Path $stateRoot 'pending-restart.txt'
+        if (Test-Path -LiteralPath $pending) {
+            $boot = (Get-CimInstance -ClassName Win32_OperatingSystem).LastBootUpTime.ToUniversalTime().Ticks
+            if ([long](Get-Content -LiteralPath $pending -Raw) -eq $boot) {
+                Write-Step 'Windows ожидает перезагрузку. Установка продолжится после входа в этот профиль.'
+                exit 3010
+            }
+            Clear-SetupResume
+        } elseif ($ResumeAfterRestart) {
+            Clear-SetupResume
+            return
         }
         $root = Get-VendorRoot
         Assert-VendorFiles $root
@@ -591,6 +656,10 @@ function Invoke-DeloSetup {
         Write-Step 'Настольное ДЕЛО готово. Проверены вход в базу и шесть ярлыков меню «Пуск».'
         Save-DesktopFiles $programsFolder $admin
 
+        if (!(Get-WindowsOptionalFeature -Online -FeatureName 'IIS-WebServerRole')) {
+            Write-Step 'В этом образе Windows недоступен IIS. Настольное ДЕЛО и TXT с данными входа готовы.'
+            return
+        }
         if (Install-IisComponents) { Require-Restart }
         Initialize-LocalSite
         if (!(Test-WebReady)) {

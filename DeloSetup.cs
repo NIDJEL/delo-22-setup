@@ -7,8 +7,8 @@ using System.Text;
 
 [assembly: AssemblyTitle("Установщик ДЕЛО 22.2")]
 [assembly: AssemblyDescription("Локальная учебная установка ДЕЛО 22.2")]
-[assembly: AssemblyFileVersion("0.3.1.0")]
-[assembly: AssemblyVersion("0.3.1.0")]
+[assembly: AssemblyFileVersion("0.3.2.0")]
+[assembly: AssemblyVersion("0.3.2.0")]
 
 internal static class DeloSetup
 {
@@ -36,11 +36,6 @@ internal static class DeloSetup
             Console.Error.WriteLine("Не удалось запустить установку. " + error.Message);
         }
 
-        if (exitCode != 0 && !Console.IsInputRedirected)
-        {
-            Console.WriteLine("Нажмите Enter, чтобы закрыть установщик.");
-            Console.ReadLine();
-        }
         return exitCode;
     }
 
@@ -70,7 +65,8 @@ internal static class DeloSetup
             string[] parameters = {
                 "-NoLogo", "-NoProfile", "-ExecutionPolicy", "RemoteSigned",
                 "-File", Path.Combine(staging, "Install-Delo.ps1"),
-                "-InstallerDirectory", installerDirectory
+                "-InstallerDirectory", installerDirectory,
+                "-InstallerPath", assembly.Location
             };
             var start = new ProcessStartInfo {
                 FileName = Path.Combine(powerShellDirectory, "powershell.exe"),

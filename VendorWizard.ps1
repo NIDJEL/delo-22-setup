@@ -141,7 +141,7 @@ function Find-WizardControl(
     }
 }
 
-function Wait-WizardControl([string]$Kind, [string]$Key, [string]$Type, [int]$Seconds = 22) {
+function Wait-WizardControl([string]$Kind, [string]$Key, [string]$Type, [int]$Seconds = 45) {
     $timer = [Diagnostics.Stopwatch]::StartNew()
     while ($timer.Elapsed.TotalSeconds -lt $Seconds) {
         try {
@@ -217,58 +217,68 @@ function Show-DatabaseInstructions([string]$Server, [string]$Owner, [pscredentia
     $null = Read-Host 'Закройте мастер после успешного создания базы и нажмите Enter'
 }
 
+function Close-SetupWizardProcess([Diagnostics.Process]$Process) {
+    if ($Process.HasExited) { return }
+    $null = $Process.CloseMainWindow()
+    if (!$Process.WaitForExit(2000)) { Stop-Process -Id $Process.Id -ErrorAction SilentlyContinue }
+}
+
 function Start-DatabaseWizard {
     param([string]$Root, [string]$Server, [string]$Owner, [pscredential]$Sa, [pscredential]$Admin, [switch]$Assist)
     if (Get-WizardWindow database) { throw 'Закройте уже открытый мастер баз данных.' }
     $directory = Join-Path $Root 'DBCreate'
-    $wizard = Start-Process -FilePath (Join-Path $directory 'dbmaster.exe') -WorkingDirectory $directory -PassThru
-    if ($Assist) { Show-DatabaseInstructions $Server $Owner $Sa $Admin; return }
-
-    try {
-        Invoke-WizardButton database '1001'
-        Select-WizardOption database '1009' 'MS SQL Server (Microsoft OLE DB)'
-        $tree = Wait-WizardControl database '1010' 'Tree'
-        $nativeTree = [IntPtr]$tree.Current.NativeWindowHandle
-        if ($nativeTree -eq [IntPtr]::Zero -or ![DeloDialog]::SelectSingleChild($nativeTree)) {
-            $item = Wait-WizardControl database 'name=Создание БД ДЕЛО 22.2' 'TreeItem' 5
-            $item.GetCurrentPattern([Windows.Automation.SelectionItemPattern]::Pattern).Select()
+    for ($attempt = 1; $attempt -le 2; $attempt++) {
+        $wizard = Start-Process -FilePath (Join-Path $directory 'dbmaster.exe') -WorkingDirectory $directory -PassThru
+        if ($Assist) { Show-DatabaseInstructions $Server $Owner $Sa $Admin; return }
+        $creating = $false
+        try {
+            Invoke-WizardButton database '1001'
+            Select-WizardOption database '1009' 'MS SQL Server (Microsoft OLE DB)'
+            $tree = Wait-WizardControl database '1010' 'Tree'
+            $nativeTree = [IntPtr]$tree.Current.NativeWindowHandle
+            if ($nativeTree -eq [IntPtr]::Zero -or ![DeloDialog]::SelectSingleChild($nativeTree)) {
+                $item = Wait-WizardControl database 'name=Создание БД ДЕЛО 22.2' 'TreeItem' 5
+                $item.GetCurrentPattern([Windows.Automation.SelectionItemPattern]::Pattern).Select()
+            }
+            Invoke-WizardButton database '1001'
+            Set-WizardField database '1003' $Server
+            Set-WizardField database '1006' 'SA'
+            Set-WizardField database '1007' ($Sa.GetNetworkCredential().Password)
+            Invoke-WizardButton database '1001'
+            Set-WizardField database '1004' $Owner
+            Set-WizardField database '1006' ($Admin.GetNetworkCredential().Password)
+            Set-WizardField database '1008' ($Admin.GetNetworkCredential().Password)
+            Invoke-WizardButton database '1001'
+            $null = Wait-WizardControl database '1011' 'Edit'
+            Invoke-WizardButton database '1001'
+            $null = Wait-WizardControl database '1003' 'CheckBox'
+            Invoke-WizardButton database '1001'
+            $null = Wait-WizardControl database '2006' ''
+            $creating = $true
+            Invoke-WizardButton database '1001'
+            $deadline = [DateTime]::UtcNow.AddMinutes(30)
+            while ([DateTime]::UtcNow -lt $deadline) {
+                if ($wizard.HasExited) { return }
+                $window = Get-WizardWindow database
+                if (Test-WizardText $window 'SQL Server Agent.*Прекратить установку БД') {
+                    Invoke-WizardButton database 'name=Нет'
+                }
+                if (Test-WizardText $window 'успешно завершен|успешно выполнен|Операция завершена|Выполнение операции завершено') {
+                    return
+                }
+                $protocol = Join-Path $directory "Создание БД\dbmaster_$Owner.log"
+                if (Test-Path -LiteralPath $protocol) {
+                    if ((Get-Content -LiteralPath $protocol -Tail 16 -Encoding Default) -match 'Операция .*завершена') { return }
+                }
+                Start-Sleep -Seconds 2
+            }
+            throw [TimeoutException]::new('Истекло время создания базы.')
+        } catch {
+            $details = $_.Exception.Message
+            if ($creating -or $attempt -eq 2) { throw "Не завершилось автоматическое создание базы. $details" }
+            Close-SetupWizardProcess $wizard
+            Write-Step "Повторно открываю мастер базы. $details"
         }
-        Invoke-WizardButton database '1001'
-        Set-WizardField database '1003' $Server
-        Set-WizardField database '1006' 'SA'
-        Set-WizardField database '1007' ($Sa.GetNetworkCredential().Password)
-        Invoke-WizardButton database '1001'
-        Set-WizardField database '1004' $Owner
-        Set-WizardField database '1006' ($Admin.GetNetworkCredential().Password)
-        Set-WizardField database '1008' ($Admin.GetNetworkCredential().Password)
-        Invoke-WizardButton database '1001'
-        $null = Wait-WizardControl database '1011' 'Edit'
-        Invoke-WizardButton database '1001'
-        $null = Wait-WizardControl database '1003' 'CheckBox'
-        Invoke-WizardButton database '1001'
-        $null = Wait-WizardControl database '2006' ''
-        Invoke-WizardButton database '1001'
-        $deadline = [DateTime]::UtcNow.AddMinutes(12)
-        while ([DateTime]::UtcNow -lt $deadline) {
-            if ($wizard.HasExited) { return }
-            $window = Get-WizardWindow database
-            if (Test-WizardText $window 'SQL Server Agent.*Прекратить установку БД') {
-                Invoke-WizardButton database 'name=Нет'
-            }
-            if (Test-WizardText $window 'успешно завершен|успешно выполнен|Операция завершена|Выполнение операции завершено') {
-                break
-            }
-            $protocol = Join-Path $directory "Создание БД\dbmaster_$Owner.log"
-            if (Test-Path -LiteralPath $protocol) {
-                if ((Get-Content -LiteralPath $protocol -Tail 16 -Encoding Default) -match 'Операция .*завершена') { return }
-            }
-            Start-Sleep -Seconds 2
-        }
-    } catch {
-        $details = $_.Exception.GetType().Name
-        if ($_.Exception -is [TimeoutException]) { $details = $_.Exception.Message }
-        Write-Step "Мастер БД требует ручного завершения. $details"
-        Show-DatabaseInstructions $Server $Owner $Sa $Admin
     }
 }
 
@@ -290,10 +300,7 @@ function Close-CompletedDatabaseWizard([string]$Root, [string]$Owner) {
     $program = Join-Path $directory 'dbmaster.exe'
     foreach ($process in @(Get-Process -Name dbmaster -ErrorAction SilentlyContinue)) {
         if ($process.Path -ine $program) { continue }
-        $null = $process.CloseMainWindow()
-        if (!$process.WaitForExit(2000)) {
-            Stop-Process -Id $process.Id -ErrorAction SilentlyContinue
-        }
+        Close-SetupWizardProcess $process
         Write-Step 'Завершённое окно мастера базы закрыто.'
     }
 }
@@ -333,8 +340,7 @@ function Test-WebWizardMissingField([Windows.Automation.AutomationElement]$Windo
 function Close-WebWizardBeforeInstall([Windows.Automation.AutomationElement]$Window, [Diagnostics.Process]$Process) {
     if (!(Test-WizardText $Window 'Вас приветствует программа установки|Сервер базы данных') -and
         !(Test-WebWizardMissingField $Window)) { return $false }
-    $null = $Process.CloseMainWindow()
-    if (!$Process.WaitForExit(1600)) { Stop-Process -Id $Process.Id }
+    Close-SetupWizardProcess $Process
     $true
 }
 
@@ -365,7 +371,7 @@ function Get-WebWizardStage([Windows.Automation.AutomationElement]$Window, [arra
     throw [TimeoutException]::new('Текущий экран мастера требует ручного продолжения.')
 }
 
-function Start-WebWizard {
+function Invoke-WebWizard {
     param([string]$Root, [string]$Server, [string]$Owner, [pscredential]$Admin, [string]$SiteName, [string]$SiteUrl, [switch]$Assist)
     $state = Join-Path $stateRoot 'web-wizard.json'
     $wizard = Get-SavedWebWizardProcess $state
@@ -425,7 +431,7 @@ function Start-WebWizard {
                 throw [TimeoutException]::new('Мастер не сохранил реквизиты подключения.')
             }
         }
-        $deadline = [DateTime]::UtcNow.AddMinutes(12)
+        $deadline = [DateTime]::UtcNow.AddMinutes(20)
         while ([DateTime]::UtcNow -lt $deadline) {
             if ((Test-WebReady) -and (Close-CompletedWebWizard)) { return }
             if ($wizard.HasExited -and !(Get-WizardWindow web)) {
@@ -443,9 +449,24 @@ function Start-WebWizard {
         }
         $details = $_.Exception.GetType().Name
         if ($_.Exception -is [TimeoutException]) { $details = $_.Exception.Message }
-        Write-Step "Мастер сервера требует ручного завершения. $details"
-        Show-WebInstructions $Server $Owner $SiteName $SiteUrl
+        throw "Не завершилась автоматическая установка ДЕЛО-Web. $details"
     } finally {
         $script:webWizardProcessId = $null
+    }
+}
+
+function Start-WebWizard {
+    param([string]$Root, [string]$Server, [string]$Owner, [pscredential]$Admin, [string]$SiteName, [string]$SiteUrl, [switch]$Assist)
+    for ($attempt = 1; $attempt -le 2; $attempt++) {
+        try {
+            Invoke-WebWizard $Root $Server $Owner $Admin $SiteName $SiteUrl -Assist:$Assist
+            return
+        } catch {
+            if ($Assist -or $attempt -eq 2) { throw }
+            $wizard = Get-SavedWebWizardProcess (Join-Path $stateRoot 'web-wizard.json')
+            $window = if ($wizard) { Get-WizardWindow web $wizard.Id }
+            if (!$window -or !(Close-WebWizardBeforeInstall $window $wizard)) { throw }
+            Write-Step 'Повторно открываю мастер серверной части с параметрами подключения.'
+        }
     }
 }

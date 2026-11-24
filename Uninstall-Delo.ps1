@@ -111,6 +111,12 @@ function Remove-LabShortcuts {
                 $target = $shell.CreateShortcut($file.FullName).TargetPath
                 if ($target -in $programFolders) { Remove-Item -LiteralPath $file.FullName }
             }
+            if ($file.Name -match '^Дело - управление(?: \(\d+\))?\.lnk$') {
+                $link = $shell.CreateShortcut($file.FullName)
+                if ($link.Arguments -ceq '-Menu' -and $link.Description -ceq 'Управление учебной установкой ДЕЛО 22.2') {
+                    Remove-Item -LiteralPath $file.FullName
+                }
+            }
             if ($credentialText -and $file.Name -match '^Дело - вход(?: \(\d+\))?\.txt$' -and
                 [IO.File]::ReadAllText($file.FullName) -ceq $credentialText) {
                 Remove-Item -LiteralPath $file.FullName
@@ -143,6 +149,7 @@ function Invoke-DeloUninstall {
     Write-Host "Будут удалены учебный клиент, сайт и база $database с документами, а также скачанные пакеты."
     $answer = [string](Read-Host 'Для подтверждения введите УДАЛИТЬ')
     if ($answer.Trim() -ne 'УДАЛИТЬ') { return }
+    Clear-SetupResume
 
     . (Join-Path $PSScriptRoot 'VendorWizard.ps1')
     $wizard = Get-SavedWebWizardProcess (Join-Path $stateRoot 'web-wizard.json')
