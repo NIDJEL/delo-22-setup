@@ -1,6 +1,7 @@
 ﻿Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes, System.Windows.Forms
 Add-Type -TypeDefinition @'
 using System;
+using System.ComponentModel;
 using System.Runtime.InteropServices;
 using System.Text;
 public static class DeloDialog {
@@ -17,6 +18,25 @@ public static class DeloDialog {
     [DllImport("user32.dll")] private static extern bool PostMessage(IntPtr window, uint message, IntPtr wParam, IntPtr lParam);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern int GetClassName(IntPtr window, StringBuilder name, int capacity);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
+    private static extern int GetLocaleInfoEx(string localeName, uint type, StringBuilder value, int capacity);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
+    private static extern bool SetLocaleInfoW(uint locale, uint type, string value);
+
+    public static string GetShortDate() {
+        const uint shortDate = 0x1f;
+        var value = new StringBuilder(100);
+        if (GetLocaleInfoEx(null, shortDate, value, value.Capacity) == 0) throw new Win32Exception();
+        return value.ToString();
+    }
+
+    public static void SetShortDate(string value) {
+        const uint userDefault = 0x400;
+        const uint shortDate = 0x1f;
+        if (!SetLocaleInfoW(userDefault, shortDate, value)) throw new Win32Exception();
+        IntPtr result;
+        SendMessageTimeout(new IntPtr(0xffff), 0x001a, IntPtr.Zero, "intl", 2, 1000, out result);
+    }
 
     private static IntPtr Send(IntPtr window, uint message, long wParam, IntPtr value) {
         IntPtr result;

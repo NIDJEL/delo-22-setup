@@ -197,6 +197,7 @@ function Invoke-DeloUninstall {
     Remove-LabIisSite
     Remove-LabSqlServer
     Remove-LabShortcuts
+    Restore-DeloDateFormat
     Remove-VerifiedSetupDirectory $stateRoot (Join-Path $env:LOCALAPPDATA 'Delo22Lab-Setup')
     Write-Host 'Удаление учебной установки завершено. Общие компоненты Windows сохранены.'
 }

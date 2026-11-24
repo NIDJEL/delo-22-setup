@@ -26,6 +26,7 @@ $sqlServer = ".\$instance"
 $siteName = 'Delo22Lab'
 $sitePort = 8765
 $siteUrl = "http://127.0.0.1:$sitePort/$owner/"
+$deloShortDate = 'dd/MM/yyyy'
 $stateRoot = Join-Path $env:LOCALAPPDATA 'Delo22Lab-Setup'
 $cache = Join-Path $stateRoot 'Media'
 $statusPath = Join-Path $stateRoot 'setup.log'
@@ -458,6 +459,26 @@ function Install-DesktopClient([string]$Root) {
     if (!(Test-ClientReady)) { throw 'Не удалось подтвердить конфигурацию настольного клиента.' }
 }
 
+function Set-DeloDateFormat {
+    $current = [DeloDialog]::GetShortDate()
+    if ($current -ceq $deloShortDate) { return }
+    $backup = Join-Path $stateRoot 'short-date-before.txt'
+    Set-Content -LiteralPath $backup -Value $current -NoNewline -Encoding UTF8
+    [DeloDialog]::SetShortDate($deloShortDate)
+    Write-Step "Короткая дата текущего профиля Windows настроена для настольного ДЕЛО ($deloShortDate)."
+}
+
+function Restore-DeloDateFormat {
+    $backup = Join-Path $stateRoot 'short-date-before.txt'
+    if ((Test-Path -LiteralPath $backup -PathType Leaf) -and [DeloDialog]::GetShortDate() -ceq $deloShortDate) {
+        $previous = Get-Content -LiteralPath $backup -Raw -Encoding UTF8
+        if ($previous) {
+            [DeloDialog]::SetShortDate($previous)
+            Write-Step 'Короткая дата текущего профиля Windows восстановлена.'
+        }
+    }
+}
+
 function Get-DesktopProgramsFolder {
     $shortcuts = 'Документы', 'Отчетные формы', 'Подсистема протоколирования',
         'Пользователи', 'Поточное сканирование', 'Справочники'
@@ -667,6 +688,7 @@ function Invoke-DeloSetup {
         Close-CompletedDatabaseWizard $root $owner
         Install-DesktopClient $root
         $programsFolder = Get-DesktopProgramsFolder
+        Set-DeloDateFormat
         Write-Step 'Настольное ДЕЛО готово. Проверены вход в базу и шесть ярлыков меню «Пуск».'
         Save-DesktopFiles $programsFolder $admin
 
