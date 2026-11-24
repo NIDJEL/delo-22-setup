@@ -7,8 +7,8 @@ using System.Text;
 
 [assembly: AssemblyTitle("Установщик ДЕЛО 22.2")]
 [assembly: AssemblyDescription("Локальная учебная установка ДЕЛО 22.2")]
-[assembly: AssemblyFileVersion("0.2.2.0")]
-[assembly: AssemblyVersion("0.2.2.0")]
+[assembly: AssemblyFileVersion("0.3.0.0")]
+[assembly: AssemblyVersion("0.3.0.0")]
 
 internal static class DeloSetup
 {
@@ -16,6 +16,7 @@ internal static class DeloSetup
     {
         "Install-Delo.ps1",
         "VendorWizard.ps1",
+        "Uninstall-Delo.ps1",
         "VendorFiles.json"
     };
 
@@ -34,7 +35,7 @@ internal static class DeloSetup
             Console.Error.WriteLine("Не удалось запустить установку. " + error.Message);
         }
 
-        if (args.Length == 0 && !Console.IsInputRedirected)
+        if (exitCode != 0 && !Console.IsInputRedirected)
         {
             Console.WriteLine("Нажмите Enter, чтобы закрыть установщик.");
             Console.ReadLine();

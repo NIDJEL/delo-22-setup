@@ -3,6 +3,8 @@ param(
     [string]$SourceFolder,
     [uri]$ArchiveUrl,
     [string]$InstallerDirectory,
+    [switch]$Install,
+    [switch]$Uninstall,
     [switch]$Check,
     [switch]$DownloadOnly,
     [switch]$ManualWizard,
@@ -81,14 +83,31 @@ function Receive-File([uri]$Uri, [string]$Path) {
     if ($Uri.Scheme -ne 'https') { throw 'Для загрузки требуется HTTPS.' }
     $temp = "$Path.partial"
     Write-Step ('Загрузка ' + (Split-Path $Path -Leaf))
-    & curl.exe --fail --location --proto '=https' --proto-redir '=https' --retry 2 --retry-delay 2 --connect-timeout 20 --max-time 7200 --progress-bar --output $temp $Uri.AbsoluteUri
+    $arguments = @('--fail','--location','--proto','=https','--proto-redir','=https',
+        '--retry','3','--retry-delay','2','--connect-timeout','20','--max-time','7200',
+        '--progress-bar','--output',$temp)
+    $partial = Get-Item -LiteralPath $temp -ErrorAction SilentlyContinue
+    if ($partial -and $partial.Length -gt 0) {
+        & curl.exe @arguments --continue-at - $Uri.AbsoluteUri
+        if ($LASTEXITCODE -in 22, 33, 36) { & curl.exe @arguments $Uri.AbsoluteUri }
+    } else {
+        & curl.exe @arguments $Uri.AbsoluteUri
+    }
     if ($LASTEXITCODE -ne 0) { throw ('Не удалось скачать ' + (Split-Path $Path -Leaf)) }
     Move-Item -LiteralPath $temp -Destination $Path -Force
 }
 
 function Get-MicrosoftPackage([string]$Key) {
     $path = Join-Path $cache $packageNames[$Key]
-    if (!(Test-Path -LiteralPath $path)) { Receive-File $packages[$Key] $path }
+    if (Test-Path -LiteralPath $path) {
+        try {
+            Assert-Publisher $path 'CN=Microsoft Corporation'
+            return $path
+        } catch {
+            Write-Step ('Скачиваю пакет заново после ошибки проверки подписи ' + $packageNames[$Key])
+        }
+    }
+    Receive-File $packages[$Key] $path
     Assert-Publisher $path 'CN=Microsoft Corporation'
     $path
 }
@@ -356,6 +375,7 @@ function Test-ClientReady {
 function Require-Restart {
     $launcher = if ($InstallerDirectory) { 'Delo-Setup.exe' } else { 'Start-Delo-Setup.cmd' }
     Write-Step "Перезагрузите Windows и снова запустите $launcher. Установленные компоненты и скачанные файлы сохранятся."
+    if ($Uninstall) { Write-Host 'После перезагрузки выберите «Удалить ДЕЛО».' }
     exit 3010
 }
 
@@ -403,7 +423,7 @@ function Get-AdjacentOutputPath([string]$Name, [scriptblock]$CanReuse) {
     }
 }
 
-function Save-DesktopFiles([string]$ProgramsFolder, [pscredential]$Admin) {
+function Get-DesktopCredentialText([pscredential]$Admin) {
     $contents = @(
         'Учебная установка ДЕЛО 22.2'
         ''
@@ -411,8 +431,11 @@ function Save-DesktopFiles([string]$ProgramsFolder, [pscredential]$Admin) {
         "Пароль: $($Admin.GetNetworkCredential().Password)"
         "ДЕЛО-Web: $siteUrl"
     ) -join "`r`n"
-    $contents += "`r`n"
+    $contents + "`r`n"
+}
 
+function Save-DesktopFiles([string]$ProgramsFolder, [pscredential]$Admin) {
+    $contents = Get-DesktopCredentialText $Admin
     $credentials = Get-AdjacentOutputPath 'Дело - вход.txt' {
         param($path)
         [IO.File]::ReadAllText($path) -ceq $contents
@@ -439,6 +462,7 @@ function Save-DesktopFiles([string]$ProgramsFolder, [pscredential]$Admin) {
         $link.Save()
     }
     Write-Step "Ярлык на настольные модули сохранён в файле $shortcut"
+    Set-Content -LiteralPath (Join-Path $stateRoot 'output-directory.txt') -Value $InstallerDirectory -Encoding UTF8
 }
 
 function Show-Preflight {
@@ -456,6 +480,7 @@ function Show-Preflight {
 }
 
 function Invoke-DeloSetup {
+    if ($Install -and $Uninstall) { throw 'Выберите одну операцию.' }
     if ($CopyPassword) {
         $file = Join-Path $stateRoot "$owner.xml"
         if (!(Test-Path -LiteralPath $file)) { throw 'Пароль появится после создания локальной базы.' }
@@ -464,9 +489,21 @@ function Invoke-DeloSetup {
         Write-Host "Пароль для $owner скопирован в буфер обмена."
         return
     }
-    Show-Preflight
-    if ($Check) { return }
-    New-Item -ItemType Directory -Path $cache -Force | Out-Null
+    if (!$Install -and !$Uninstall -and !$Check -and !$DownloadOnly -and
+        !$ManualWizard -and !$SourceFolder -and !$ArchiveUrl) {
+        Write-Host 'ДЕЛО 22.2'
+        Write-Host '1. Установить или продолжить'
+        Write-Host '2. Удалить ДЕЛО и скачанные файлы'
+        $choice = ([string](Read-Host 'Введите 1 или 2')).Trim()
+        if ($choice -eq '2') { $Uninstall = $true }
+        elseif ($choice -notin '', '1') { return }
+    }
+
+    if (!$Uninstall) {
+        Show-Preflight
+        if ($Check) { return }
+        New-Item -ItemType Directory -Path $cache -Force | Out-Null
+    }
     if ($DownloadOnly) {
         foreach ($item in 'Rewrite','Routing','Hosting','SqlBootstrap') { Get-MicrosoftPackage $item | Out-Null }
         Assert-VendorFiles (Get-VendorRoot)
@@ -482,6 +519,7 @@ function Invoke-DeloSetup {
         if ($ArchiveUrl) { $arguments += @('-ArchiveUrl', ('"' + $ArchiveUrl.AbsoluteUri + '"')) }
         if ($InstallerDirectory) { $arguments += @('-InstallerDirectory', ('"' + $InstallerDirectory + '"')) }
         if ($ManualWizard) { $arguments += '-ManualWizard' }
+        if ($Uninstall) { $arguments += '-Uninstall' } else { $arguments += '-Install' }
         $child = Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') -Verb RunAs -ArgumentList $arguments -Wait -PassThru
         exit $child.ExitCode
     }
@@ -491,6 +529,11 @@ function Invoke-DeloSetup {
     try {
         try { $held = $lock.WaitOne(0) } catch [Threading.AbandonedMutexException] { $held = $true }
         if (!$held) { throw 'Установщик уже открыт.' }
+        if ($Uninstall) {
+            . (Join-Path $PSScriptRoot 'Uninstall-Delo.ps1')
+            Invoke-DeloUninstall
+            return
+        }
         $consent = Join-Path $stateRoot 'accepted'
         if (!(Test-Path -LiteralPath $consent)) {
             Write-Host 'Учебная установка ДЕЛО 22.2 и Microsoft SQL Server 2019 Express.'
@@ -526,6 +569,7 @@ function Invoke-DeloSetup {
             Write-Step "База $database уже создана."
         }
         Assert-DatabaseLogin $admin
+        Close-CompletedDatabaseWizard $root $owner
         Install-DesktopClient $root
         $programsFolder = Get-DesktopProgramsFolder
         Write-Step 'Настольное ДЕЛО готово. Проверены вход в базу и шесть ярлыков меню «Пуск».'
@@ -542,17 +586,15 @@ function Invoke-DeloSetup {
                 Start-Sleep -Seconds 4
             }
             if (!$ready) { throw "Страница входа пока не открывается по адресу $siteUrl." }
+        } else {
+            $null = Close-CompletedWebWizard
         }
         $shortcut = Join-Path ([Environment]::GetFolderPath('Programs')) 'DELO 22.2 Web.url'
         Set-Content -LiteralPath $shortcut -Value @('[InternetShortcut]', "URL=$siteUrl") -Encoding ASCII
         Write-Step "Установка проверена. $siteUrl"
         Write-Host "Логин администратора: $owner"
-        if ($InstallerDirectory) {
-            Start-Process -FilePath "$env:SystemRoot\explorer.exe" -ArgumentList ('"' + $programsFolder + '"')
-        } else {
-            $null = Read-Host 'Нажмите Enter, чтобы скопировать пароль и открыть страницу входа'
+        if (!$InstallerDirectory) {
             $admin.GetNetworkCredential().Password | Set-Clipboard
-            Start-Process $siteUrl
         }
     } finally {
         if ($held) { $lock.ReleaseMutex() }

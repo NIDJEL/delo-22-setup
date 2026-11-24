@@ -8,7 +8,7 @@ if (!(Test-Path -LiteralPath $compiler -PathType Leaf)) {
     throw 'Не найден компилятор C# из .NET Framework 4.x.'
 }
 $output = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutputPath)
-$resources = 'Install-Delo.ps1', 'VendorWizard.ps1', 'VendorFiles.json'
+$resources = 'Install-Delo.ps1', 'VendorWizard.ps1', 'Uninstall-Delo.ps1', 'VendorFiles.json'
 $arguments = @('/nologo', '/utf8output', '/codepage:65001', '/target:exe', '/platform:x64',
     '/optimize+', '/warnaserror+', "/out:$output", "/win32manifest:$PSScriptRoot\DeloSetup.manifest")
 foreach ($resource in $resources) {

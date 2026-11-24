@@ -283,6 +283,63 @@ function Show-WebInstructions([string]$Server, [string]$Owner, [pscredential]$Ad
     $null = Read-Host 'Нажмите «Установить», дождитесь завершения, закройте мастер и нажмите Enter здесь'
 }
 
+function Close-CompletedDatabaseWizard([string]$Root, [string]$Owner) {
+    $directory = Join-Path $Root 'DBCreate'
+    $protocol = Join-Path $directory "Создание БД\dbmaster_$Owner.log"
+    if (!(Test-Path -LiteralPath $protocol)) { return }
+    $lines = [IO.File]::ReadAllLines($protocol, [Text.Encoding]::GetEncoding(1251))
+    if (!($lines | Select-Object -Last 16 | Where-Object { $_ -match 'Операция .*завершена' })) { return }
+
+    $program = Join-Path $directory 'dbmaster.exe'
+    foreach ($process in @(Get-Process -Name dbmaster -ErrorAction SilentlyContinue)) {
+        if ($process.Path -ine $program) { continue }
+        $null = $process.CloseMainWindow()
+        if (!$process.WaitForExit(2000)) {
+            Stop-Process -Id $process.Id -ErrorAction SilentlyContinue
+        }
+        Write-Step 'Завершённое окно мастера базы закрыто.'
+    }
+}
+
+function Start-VendorWebSetup([string]$Root, [string]$Server, [string]$Owner, [string]$SiteUrl) {
+    $directory = Join-Path $Root 'ServerSetup'
+    $setup = Join-Path $directory 'setup.exe'
+    # Non-secret values go straight to Windows Installer, before its edit controls exist.
+    $properties = "DBTYPE=MSS DBSERVERNAME=$Server DBOWNER=$Owner DELOWEBAPPNAME=$Owner DELOWEBURLCHANGE=1 DELOWEBURLCHANGED=$SiteUrl"
+    Start-Process -FilePath $setup -ArgumentList ('/v"' + $properties + '"') -WorkingDirectory $directory -PassThru
+}
+
+function Get-SavedWebWizard([Windows.Automation.AutomationElement]$Window, [string]$State) {
+    if (!$Window -or !(Test-Path -LiteralPath $State)) { return }
+    $processId = $Window.Current.ProcessId
+    if (!$processId) { return }
+    $current = Get-Process -Id $processId -ErrorAction SilentlyContinue
+    if (!$current) { return }
+    $saved = Get-Content -LiteralPath $State -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ($saved -and $saved.Id -eq $current.Id -and $saved.StartTicks -eq $current.StartTime.ToUniversalTime().Ticks) {
+        @{ Process = $current; PropertiesPreset = [bool]($saved.PSObject.Properties['PropertiesPreset'] -and $saved.PropertiesPreset) }
+    }
+}
+
+function Close-WebWizardBeforeInstall([Windows.Automation.AutomationElement]$Window, [Diagnostics.Process]$Process) {
+    if (!(Test-WizardText $Window 'Вас приветствует программа установки|Сервер базы данных|Не задано поле')) { return $false }
+    $null = $Process.CloseMainWindow()
+    if (!$Process.WaitForExit(1600)) { Stop-Process -Id $Process.Id }
+    $true
+}
+
+function Close-CompletedWebWizard {
+    $window = Get-WizardWindow web
+    if (!(Get-SavedWebWizard $window (Join-Path $stateRoot 'web-wizard.json'))) { return $false }
+    foreach ($caption in 'Готово', '&Готово', 'Завершить', '&Завершить', 'Закрыть', '&Закрыть') {
+        if (Find-WizardControl $window "name=$caption" 'Button') {
+            Invoke-WizardButton web "name=$caption"
+            return $true
+        }
+    }
+    $false
+}
+
 function Get-WebWizardStage([Windows.Automation.AutomationElement]$Window, [array]$Pages) {
     if (Test-WizardText $Window 'Не задано поле') {
         throw [TimeoutException]::new('Мастер отклонил заполненные реквизиты. Закройте предупреждение и заполните поля вручную.')
@@ -294,7 +351,7 @@ function Get-WebWizardStage([Windows.Automation.AutomationElement]$Window, [arra
     foreach ($control in $Window.FindAll($treeBelow, $allElements)) {
         if (!$control.Current.IsOffscreen -and
             ([DeloDialog]::WindowClass([IntPtr]$control.Current.NativeWindowHandle) -eq 'msctls_progress32' -or
-                $control.Current.Name -match '^(?:&)?(?:Готово|Завершить)$')) { return $Pages.Count }
+                $control.Current.Name -match '^(?:&)?(?:Готово|Завершить|Закрыть)$')) { return $Pages.Count }
     }
     throw [TimeoutException]::new('Текущий экран мастера требует ручного продолжения.')
 }
@@ -304,25 +361,31 @@ function Start-WebWizard {
     $state = Join-Path $stateRoot 'web-wizard.json'
     $window = Get-WizardWindow web
     $wizard = $null
+    $propertiesPreset = $false
     if ($window) {
-        $current = Get-Process -Id $window.Current.ProcessId
-        $saved = if (Test-Path -LiteralPath $state) {
-            Get-Content -LiteralPath $state -Raw -Encoding UTF8 | ConvertFrom-Json
-        }
-        if (!$saved -or $saved.Id -ne $current.Id -or $saved.StartTicks -ne $current.StartTime.ToUniversalTime().Ticks) {
+        $saved = Get-SavedWebWizard $window $state
+        if (!$saved) {
             throw 'Открыт мастер серверной части от другого запуска. Закройте его и снова запустите обновлённый установщик.'
         }
-        $script:webWizardProcessId = $current.Id
-        Write-Step 'Продолжаю работу с открытым мастером серверной части.'
-    } else {
-        $directory = Join-Path $Root 'ServerSetup'
-        $wizard = Start-Process -FilePath (Join-Path $directory 'setup.exe') -WorkingDirectory $directory -PassThru
+        $propertiesPreset = $saved.PropertiesPreset
+        if (!$propertiesPreset -and (Close-WebWizardBeforeInstall $window $saved.Process)) {
+            $window = $null
+            Write-Step 'Предыдущий мастер остановился на вводе реквизитов. Открываю форму с заданными параметрами.'
+        } else {
+            $script:webWizardProcessId = $saved.Process.Id
+            Write-Step 'Продолжаю работу с открытым мастером серверной части.'
+        }
+    }
+    if (!$window) {
+        $wizard = Start-VendorWebSetup $Root $Server $Owner $SiteUrl
+        $propertiesPreset = $true
         try {
             $firstButton = Wait-WizardControl web '15447' 'Button'
             $current = Get-Process -Id $firstButton.Current.ProcessId
             @{
                 Id = $current.Id
                 StartTicks = $current.StartTime.ToUniversalTime().Ticks
+                PropertiesPreset = $propertiesPreset
             } | ConvertTo-Json -Compress | Set-Content -LiteralPath $state -Encoding UTF8
             $script:webWizardProcessId = $current.Id
             $window = Get-WizardWindow web
@@ -344,8 +407,10 @@ function Start-WebWizard {
             $null = Wait-WizardControl web $pages[$step][0] $pages[$step][1]
             switch ($step) {
                 1 {
-                    Set-WizardField web '15465' $Server
-                    Set-WizardField web '15470' $Owner
+                    if (!$propertiesPreset) {
+                        Set-WizardField web '15465' $Server
+                        Set-WizardField web '15470' $Owner
+                    }
                     Set-WizardField web '15474' ($Admin.GetNetworkCredential().Password)
                 }
                 4 { Select-WizardOption web '15611' $SiteName }
@@ -364,15 +429,7 @@ function Start-WebWizard {
         }
         $deadline = [DateTime]::UtcNow.AddMinutes(12)
         while ([DateTime]::UtcNow -lt $deadline) {
-            if (Test-WebReady) {
-                foreach ($caption in 'Готово', '&Готово', 'Завершить', '&Завершить') {
-                    $finish = Find-WizardControl (Get-WizardWindow web) "name=$caption" 'Button'
-                    if ($finish) {
-                        Invoke-WizardButton web "name=$caption"
-                        return
-                    }
-                }
-            }
+            if ((Test-WebReady) -and (Close-CompletedWebWizard)) { return }
             if ((!$wizard -or $wizard.HasExited) -and !(Get-WizardWindow web)) { return }
             Start-Sleep -Seconds 3
         }
