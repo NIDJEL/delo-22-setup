@@ -4,13 +4,6 @@ using System;
 using System.Runtime.InteropServices;
 using System.Text;
 public static class DeloDialog {
-    [StructLayout(LayoutKind.Sequential)]
-    private struct GuiThreadInfo {
-        public int Size, Flags;
-        public IntPtr Active, Focus, Capture, MenuOwner, MoveSize, Caret;
-        public int Left, Top, Right, Bottom;
-    }
-
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern IntPtr SendMessageTimeout(IntPtr window, uint message, IntPtr wParam, string value,
         uint flags, uint milliseconds, out IntPtr result);
@@ -18,10 +11,10 @@ public static class DeloDialog {
     private static extern IntPtr SendMessageTimeout(IntPtr window, uint message, IntPtr wParam, IntPtr value,
         uint flags, uint milliseconds, out IntPtr result);
     [DllImport("user32.dll")] private static extern IntPtr GetParent(IntPtr window);
+    [DllImport("user32.dll")] private static extern IntPtr GetAncestor(IntPtr window, uint flags);
+    [DllImport("user32.dll")] private static extern bool SetForegroundWindow(IntPtr window);
     [DllImport("user32.dll")] private static extern int GetDlgCtrlID(IntPtr window);
     [DllImport("user32.dll")] private static extern bool PostMessage(IntPtr window, uint message, IntPtr wParam, IntPtr lParam);
-    [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr window, IntPtr processId);
-    [DllImport("user32.dll")] private static extern bool GetGUIThreadInfo(uint threadId, ref GuiThreadInfo info);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern int GetClassName(IntPtr window, StringBuilder name, int capacity);
 
@@ -54,13 +47,20 @@ public static class DeloDialog {
     }
 
     public static bool FocusDialogControl(IntPtr window) {
-        return PostMessage(GetParent(window), 0x0028, window, new IntPtr(1)); // WM_NEXTDLGCTL, HWND mode
+        IntPtr dialog = GetAncestor(window, 2); // GA_ROOT
+        if (dialog == IntPtr.Zero) return false;
+        SetForegroundWindow(dialog);
+        return PostMessage(dialog, 0x0028, window, new IntPtr(1)); // WM_NEXTDLGCTL, HWND mode
     }
 
-    public static bool HasFocus(IntPtr window) {
-        var info = new GuiThreadInfo { Size = Marshal.SizeOf(typeof(GuiThreadInfo)) };
-        return GetGUIThreadInfo(GetWindowThreadProcessId(window, IntPtr.Zero), ref info)
-            && info.Focus == window;
+    public static void CommitEdit(IntPtr window) {
+        // MSI writes the property on focus loss, even when Next is invoked through WM_COMMAND.
+        const uint wmKillFocus = 0x0008;
+        const uint wmCommand = 0x0111;
+        const long enKillFocus = 0x0200;
+        Send(window, wmKillFocus, 0, IntPtr.Zero);
+        long notification = (ushort)GetDlgCtrlID(window) + (enKillFocus << 16);
+        Send(GetParent(window), wmCommand, notification, window);
     }
 
     public static bool Check(IntPtr window) {
@@ -154,24 +154,8 @@ function Wait-WizardControl([string]$Kind, [string]$Key, [string]$Type, [int]$Se
     throw [TimeoutException]::new("Не найден элемент мастера $Key.")
 }
 
-function Set-WebControlFocus([Windows.Automation.AutomationElement]$Control) {
-    # Windows Installer commits an Edit property when its control loses focus.
-    $native = [IntPtr]$Control.Current.NativeWindowHandle
-    if ($native -eq [IntPtr]::Zero -or ![DeloDialog]::FocusDialogControl($native)) {
-        $Control.SetFocus()
-    }
-    for ($attempt = 0; $attempt -lt 20; $attempt++) {
-        if ($native -ne [IntPtr]::Zero) {
-            if ([DeloDialog]::HasFocus($native)) { return }
-        } elseif ($Control.Current.HasKeyboardFocus) { return }
-        Start-Sleep -Milliseconds 60
-    }
-    throw [TimeoutException]::new('Не удалось перевести фокус в мастере серверной части.')
-}
-
 function Invoke-WizardButton([string]$Kind, [string]$Key) {
     $control = Wait-WizardControl $Kind $Key 'Button'
-    if ($Kind -eq 'web' -and $Key -in '15447','15589') { Set-WebControlFocus $control }
     $native = [IntPtr]$control.Current.NativeWindowHandle
     if ($native -eq [IntPtr]::Zero -or ![DeloDialog]::Click($native)) {
         $control.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
@@ -181,16 +165,24 @@ function Invoke-WizardButton([string]$Kind, [string]$Key) {
 
 function Set-WizardField([string]$Kind, [string]$Id, [string]$Value) {
     $control = Wait-WizardControl $Kind $Id 'Edit'
-    if ($Kind -eq 'web') { Set-WebControlFocus $control }
     $native = [IntPtr]$control.Current.NativeWindowHandle
-    if ($native -ne [IntPtr]::Zero -and [DeloDialog]::SetText($native, $Value)) { return }
+    if ($native -ne [IntPtr]::Zero) {
+        if ($Kind -eq 'web') { $null = [DeloDialog]::FocusDialogControl($native) }
+        if ([DeloDialog]::SetText($native, $Value)) {
+            if ($Kind -eq 'web') { [DeloDialog]::CommitEdit($native) }
+            return
+        }
+    }
     $pattern = $control.GetCurrentPattern([Windows.Automation.ValuePattern]::Pattern)
     $pattern.SetValue($Value)
+    if ($Kind -eq 'web') {
+        if ($native -eq [IntPtr]::Zero) { throw 'Поле мастера требует ручного ввода.' }
+        [DeloDialog]::CommitEdit($native)
+    }
 }
 
 function Select-WizardOption([string]$Kind, [string]$ComboId, [string]$Value) {
     $box = Wait-WizardControl $Kind $ComboId 'ComboBox'
-    if ($Kind -eq 'web') { Set-WebControlFocus $box }
     $native = [IntPtr]$box.Current.NativeWindowHandle
     if ($native -ne [IntPtr]::Zero -and [DeloDialog]::SelectCombo($native, $Value)) {
         Start-Sleep -Milliseconds 350

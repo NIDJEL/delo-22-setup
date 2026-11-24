@@ -7,8 +7,8 @@ using System.Text;
 
 [assembly: AssemblyTitle("Установщик ДЕЛО 22.2")]
 [assembly: AssemblyDescription("Локальная учебная установка ДЕЛО 22.2")]
-[assembly: AssemblyFileVersion("0.2.1.0")]
-[assembly: AssemblyVersion("0.2.1.0")]
+[assembly: AssemblyFileVersion("0.2.2.0")]
+[assembly: AssemblyVersion("0.2.2.0")]
 
 internal static class DeloSetup
 {
