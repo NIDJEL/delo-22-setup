@@ -55,12 +55,22 @@ function Write-Step([string]$Message) {
 }
 
 function Test-Hash([string]$Path, [string]$Hash) {
-    (Test-Path -LiteralPath $Path -PathType Leaf) -and
-        ((Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash -eq $Hash)
+    if (!(Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
+    $stream = [IO.File]::OpenRead($Path)
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try {
+        $actual = [BitConverter]::ToString($sha256.ComputeHash($stream)).Replace('-', '')
+        $actual -eq $Hash
+    } finally {
+        $sha256.Dispose()
+        $stream.Dispose()
+    }
 }
 
 function Assert-Publisher([string]$Path, [string]$Publisher) {
-    $sig = Get-AuthenticodeSignature -LiteralPath $Path
+    $module = Join-Path $PSHOME 'Modules\Microsoft.PowerShell.Security\Microsoft.PowerShell.Security.psd1'
+    Import-Module -Name $module -ErrorAction Stop
+    $sig = Microsoft.PowerShell.Security\Get-AuthenticodeSignature -LiteralPath $Path
     if ($sig.Status -ne 'Valid' -or $sig.SignerCertificate.Subject -notmatch $Publisher) {
         throw ('Не прошла проверка подписи. ' + (Split-Path $Path -Leaf))
     }
@@ -181,7 +191,7 @@ function Test-DeloDatabase {
 }
 
 function Install-WindowsFeatures {
-    $modernNet35 = [Environment]::OSVersion.Version.Build -ge 28000
+    $modernNet35 = [int](Get-CimInstance -ClassName Win32_OperatingSystem).BuildNumber -ge 28000
     $toEnable = @()
     foreach ($feature in $windowsFeatures) {
         if ($modernNet35 -and $feature -eq 'NetFx3') { continue }

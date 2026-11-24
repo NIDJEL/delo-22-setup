@@ -127,7 +127,7 @@ function Wait-WizardControl([string]$Kind, [string]$Key, [string]$Type, [int]$Se
         } catch [Windows.Automation.ElementNotAvailableException] {}
         Start-Sleep -Milliseconds 280
     }
-    throw "Не найден элемент мастера $Key. Завершите открытый мастер вручную."
+    throw [TimeoutException]::new("Не найден элемент мастера $Key.")
 }
 
 function Invoke-WizardButton([string]$Kind, [string]$Key) {
@@ -213,7 +213,7 @@ function Start-DatabaseWizard {
         Invoke-WizardButton database '1001'
         $null = Wait-WizardControl database '1003' 'CheckBox'
         Invoke-WizardButton database '1001'
-        $null = Wait-WizardControl database 'name=Проверка параметров...' 'Text'
+        $null = Wait-WizardControl database '2006' ''
         Invoke-WizardButton database '1001'
         $deadline = [DateTime]::UtcNow.AddMinutes(12)
         while ([DateTime]::UtcNow -lt $deadline) {
@@ -232,7 +232,9 @@ function Start-DatabaseWizard {
             Start-Sleep -Seconds 2
         }
     } catch {
-        Write-Step ('Мастер БД требует ручного завершения. ' + $_.Exception.GetType().Name)
+        $details = $_.Exception.GetType().Name
+        if ($_.Exception -is [TimeoutException]) { $details = $_.Exception.Message }
+        Write-Step "Мастер БД требует ручного завершения. $details"
         Show-DatabaseInstructions $Server $Owner $Sa $Admin
     }
 }
@@ -254,17 +256,17 @@ function Start-WebWizard {
     if ($Assist) { Show-WebInstructions $Server $Owner $Admin $SiteName $SiteUrl; return }
 
     try {
-        Invoke-WizardButton web 'name=Далее >'
+        Invoke-WizardButton web '15447'
         Set-WizardField web '15465' $Server
         Set-WizardField web '15470' $Owner
         Set-WizardField web '15474' ($Admin.GetNetworkCredential().Password)
-        Invoke-WizardButton web 'name=Далее >'
+        Invoke-WizardButton web '15447'
         $null = Wait-WizardControl web '15525' 'Edit'
-        Invoke-WizardButton web 'name=Далее >'
+        Invoke-WizardButton web '15447'
         $null = Wait-WizardControl web '15559' 'Tree'
-        Invoke-WizardButton web 'name=Далее >'
+        Invoke-WizardButton web '15447'
         Select-WizardOption web '15611' $SiteName
-        Invoke-WizardButton web 'name=Далее >'
+        Invoke-WizardButton web '15447'
         $box = Wait-WizardControl web '15600' 'CheckBox'
         $native = [IntPtr]$box.Current.NativeWindowHandle
         if ($native -eq [IntPtr]::Zero -or ![DeloDialog]::Check($native)) {
@@ -272,22 +274,26 @@ function Start-WebWizard {
             if ($toggle.Current.ToggleState -eq [Windows.Automation.ToggleState]::Off) { $toggle.Toggle() }
         }
         Set-WizardField web '15606' $SiteUrl
-        Invoke-WizardButton web 'name=Далее >'
-        Invoke-WizardButton web 'name=Установить'
+        Invoke-WizardButton web '15447'
+        Invoke-WizardButton web '15589'
         $deadline = [DateTime]::UtcNow.AddMinutes(12)
         while ([DateTime]::UtcNow -lt $deadline) {
             if (Test-WebReady) {
-                $finish = Find-WizardControl (Get-WizardWindow web) 'name=Готово' 'Button'
-                if ($finish) {
-                    Invoke-WizardButton web 'name=Готово'
-                    return
+                foreach ($caption in 'Готово', '&Готово', 'Завершить', '&Завершить') {
+                    $finish = Find-WizardControl (Get-WizardWindow web) "name=$caption" 'Button'
+                    if ($finish) {
+                        Invoke-WizardButton web "name=$caption"
+                        return
+                    }
                 }
             }
             if ($wizard.HasExited -and !(Get-WizardWindow web)) { return }
             Start-Sleep -Seconds 3
         }
     } catch {
-        Write-Step ('Мастер сервера требует ручного завершения. ' + $_.Exception.GetType().Name)
+        $details = $_.Exception.GetType().Name
+        if ($_.Exception -is [TimeoutException]) { $details = $_.Exception.Message }
+        Write-Step "Мастер сервера требует ручного завершения. $details"
         Show-WebInstructions $Server $Owner $Admin $SiteName $SiteUrl
     }
 }
