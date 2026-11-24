@@ -102,10 +102,36 @@ function Find-VendorRoot([string]$Folder) {
     $matches[0].FullName
 }
 
+function Get-VendorManifest {
+    $manifest = Join-Path $PSScriptRoot 'VendorFiles.json'
+    if (!(Test-Hash $manifest $vendorManifestHash)) { throw 'Не совпала контрольная сумма списка файлов.' }
+    Get-Content -LiteralPath $manifest -Raw -Encoding UTF8 | ConvertFrom-Json
+}
+
+function Expand-VendorFiles([string]$ArchivePath, [string]$Destination) {
+    Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
+    $archive = [IO.Compression.ZipFile]::Open(
+        $ArchivePath, [IO.Compression.ZipArchiveMode]::Read, [Text.Encoding]::GetEncoding(866)
+    )
+    try {
+        $entries = @{}
+        foreach ($entry in $archive.Entries) { $entries[$entry.FullName.Replace('/', '\')] = $entry }
+        $prefix = [IO.Path]::GetFileNameWithoutExtension($ArchivePath) + '\'
+        foreach ($file in (Get-VendorManifest)) {
+            $entry = $entries[$prefix + $file.Path]
+            if (!$entry) { throw "В архиве отсутствует файл $($file.Path)." }
+            $target = Join-Path $Destination $file.Path
+            if (Test-Hash $target $file.Sha256) { continue }
+            New-Item -ItemType Directory -Path (Split-Path -Path $target -Parent) -Force | Out-Null
+            [IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $target, $true)
+        }
+    } finally { $archive.Dispose() }
+}
+
 function Get-VendorRoot {
     if ($SourceFolder) { return Find-VendorRoot (Resolve-Path -LiteralPath $SourceFolder).Path }
     $archive = Join-Path $cache '2025.05.27.1_Box_22.2.zip'
-    $extract = Join-Path $cache 'DeloBox-2025-05-27-cp866'
+    $extract = Join-Path $cache 'Delo22-20250527'
     $stamp = Join-Path $extract '.extracted'
     if (!(Test-Path -LiteralPath $stamp)) {
         if (!(Test-Hash $archive $vendorArchiveHash)) {
@@ -128,14 +154,8 @@ function Get-VendorRoot {
             }
         }
         if (!(Test-Hash $archive $vendorArchiveHash)) { throw 'Архив ДЕЛО не прошёл проверку SHA-256.' }
-        if (!(Test-Path -LiteralPath $extract)) {
-            Write-Step 'Распаковка ДЕЛО 22.2'
-            Add-Type -AssemblyName System.IO.Compression.FileSystem
-            $staging = "$extract-$([guid]::NewGuid().ToString('N'))"
-            [IO.Compression.ZipFile]::ExtractToDirectory($archive, $staging, [Text.Encoding]::GetEncoding(866))
-            Find-VendorRoot $staging | Out-Null
-            Move-Item -LiteralPath $staging -Destination $extract
-        }
+        Write-Step 'Распаковка ДЕЛО 22.2'
+        Expand-VendorFiles $archive $extract
         Find-VendorRoot $extract | Out-Null
         New-Item -ItemType File -Path $stamp -Force | Out-Null
     }
@@ -143,9 +163,7 @@ function Get-VendorRoot {
 }
 
 function Assert-VendorFiles([string]$Root) {
-    $manifest = Join-Path $PSScriptRoot 'VendorFiles.json'
-    if (!(Test-Hash $manifest $vendorManifestHash)) { throw 'Не совпала контрольная сумма списка файлов.' }
-    foreach ($file in (Get-Content -LiteralPath $manifest -Raw -Encoding UTF8 | ConvertFrom-Json)) {
+    foreach ($file in (Get-VendorManifest)) {
         if (!(Test-Hash (Join-Path $Root $file.Path) $file.Sha256)) {
             throw ('Файл отличается от дистрибутива 27.05.2025. ' + $file.Path)
         }
@@ -466,7 +484,8 @@ function Invoke-DeloSetup {
         $consent = Join-Path $stateRoot 'accepted'
         if (!(Test-Path -LiteralPath $consent)) {
             Write-Host 'Учебная установка ДЕЛО 22.2 и Microsoft SQL Server 2019 Express.'
-            if ((Read-Host 'Принять условия установщиков и продолжить? Введите YES') -cne 'YES') { return }
+            $answer = [string](Read-Host 'Принять условия установщиков и продолжить? Введите YES')
+            if ($answer.Trim() -ne 'YES') { return }
             New-Item -Path $consent -ItemType File -Force | Out-Null
         }
         $root = Get-VendorRoot
