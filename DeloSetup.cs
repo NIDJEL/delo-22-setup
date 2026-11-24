@@ -7,8 +7,8 @@ using System.Text;
 
 [assembly: AssemblyTitle("Установщик ДЕЛО 22.2")]
 [assembly: AssemblyDescription("Локальная учебная установка ДЕЛО 22.2")]
-[assembly: AssemblyFileVersion("0.3.0.0")]
-[assembly: AssemblyVersion("0.3.0.0")]
+[assembly: AssemblyFileVersion("0.3.1.0")]
+[assembly: AssemblyVersion("0.3.1.0")]
 
 internal static class DeloSetup
 {
@@ -16,6 +16,7 @@ internal static class DeloSetup
     {
         "Install-Delo.ps1",
         "VendorWizard.ps1",
+        "Run-WebMsi.ps1",
         "Uninstall-Delo.ps1",
         "VendorFiles.json"
     };

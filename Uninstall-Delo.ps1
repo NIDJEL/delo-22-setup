@@ -93,7 +93,7 @@ function Remove-LabShortcuts {
     $output = Join-Path $stateRoot 'output-directory.txt'
     $folders = @($InstallerDirectory)
     if (Test-Path -LiteralPath $output) {
-        $folders += (Get-Content -LiteralPath $output -Raw -Encoding UTF8).Trim()
+        $folders += Get-Content -LiteralPath $output -Encoding UTF8
     }
     $passwordFile = Join-Path $stateRoot "$owner.xml"
     $credentialText = if (Test-Path -LiteralPath $passwordFile) {
@@ -145,10 +145,18 @@ function Invoke-DeloUninstall {
     if ($answer.Trim() -ne 'УДАЛИТЬ') { return }
 
     . (Join-Path $PSScriptRoot 'VendorWizard.ps1')
-    $window = Get-WizardWindow web
+    $wizard = Get-SavedWebWizardProcess (Join-Path $stateRoot 'web-wizard.json')
+    $window = if ($wizard) { Get-WizardWindow web $wizard.Id } else { Get-WizardWindow web }
     if ($window) {
-        $saved = Get-SavedWebWizard $window (Join-Path $stateRoot 'web-wizard.json')
-        if (!$saved -or !(Close-WebWizardBeforeInstall $window $saved.Process)) {
+        $closed = $false
+        if ($wizard) {
+            if ((Test-WebReady) -and (Close-CompletedWebWizard)) {
+                $closed = $wizard.WaitForExit(3000)
+            } else {
+                $closed = Close-WebWizardBeforeInstall $window $wizard
+            }
+        }
+        if (!$closed) {
             throw 'Сначала завершите или закройте открытый мастер серверной части.'
         }
     }

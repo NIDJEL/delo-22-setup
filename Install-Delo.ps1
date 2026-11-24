@@ -2,12 +2,13 @@
 param(
     [string]$SourceFolder,
     [uri]$ArchiveUrl,
-    [string]$InstallerDirectory,
+    [string]$InstallerDirectory = $PSScriptRoot,
     [switch]$Install,
     [switch]$Uninstall,
     [switch]$Check,
     [switch]$DownloadOnly,
     [switch]$ManualWizard,
+    [switch]$Credentials,
     [switch]$CopyPassword
 )
 
@@ -434,7 +435,7 @@ function Get-DesktopCredentialText([pscredential]$Admin) {
     $contents + "`r`n"
 }
 
-function Save-DesktopFiles([string]$ProgramsFolder, [pscredential]$Admin) {
+function Save-DesktopCredentials([pscredential]$Admin) {
     $contents = Get-DesktopCredentialText $Admin
     $credentials = Get-AdjacentOutputPath 'Дело - вход.txt' {
         param($path)
@@ -448,7 +449,16 @@ function Save-DesktopFiles([string]$ProgramsFolder, [pscredential]$Admin) {
         } finally { $file.Dispose() }
     }
     Write-Step "Данные входа сохранены в файле $credentials"
+    $record = Join-Path $stateRoot 'output-directory.txt'
+    $folder = (Resolve-Path -LiteralPath $InstallerDirectory).ProviderPath
+    if (!(Test-Path -LiteralPath $record) -or $folder -notin (Get-Content -LiteralPath $record -Encoding UTF8)) {
+        Add-Content -LiteralPath $record -Value $folder -Encoding UTF8
+    }
+    $credentials
+}
 
+function Save-DesktopFiles([string]$ProgramsFolder, [pscredential]$Admin) {
+    $null = Save-DesktopCredentials $Admin
     $shell = New-Object -ComObject WScript.Shell
     $shortcut = Get-AdjacentOutputPath 'Дело.lnk' {
         param($path)
@@ -462,7 +472,6 @@ function Save-DesktopFiles([string]$ProgramsFolder, [pscredential]$Admin) {
         $link.Save()
     }
     Write-Step "Ярлык на настольные модули сохранён в файле $shortcut"
-    Set-Content -LiteralPath (Join-Path $stateRoot 'output-directory.txt') -Value $InstallerDirectory -Encoding UTF8
 }
 
 function Show-Preflight {
@@ -480,23 +489,30 @@ function Show-Preflight {
 }
 
 function Invoke-DeloSetup {
-    if ($Install -and $Uninstall) { throw 'Выберите одну операцию.' }
-    if ($CopyPassword) {
-        $file = Join-Path $stateRoot "$owner.xml"
-        if (!(Test-Path -LiteralPath $file)) { throw 'Пароль появится после создания локальной базы.' }
-        $credential = [PSCredential]::new($owner, (Import-Clixml -LiteralPath $file))
-        $credential.GetNetworkCredential().Password | Set-Clipboard
-        Write-Host "Пароль для $owner скопирован в буфер обмена."
-        return
-    }
     if (!$Install -and !$Uninstall -and !$Check -and !$DownloadOnly -and
-        !$ManualWizard -and !$SourceFolder -and !$ArchiveUrl) {
+        !$ManualWizard -and !$SourceFolder -and !$ArchiveUrl -and !$Credentials -and !$CopyPassword) {
         Write-Host 'ДЕЛО 22.2'
         Write-Host '1. Установить или продолжить'
         Write-Host '2. Удалить ДЕЛО и скачанные файлы'
-        $choice = ([string](Read-Host 'Введите 1 или 2')).Trim()
+        Write-Host '3. Открыть TXT с логином и паролем'
+        $choice = ([string](Read-Host 'Введите 1, 2 или 3')).Trim()
         if ($choice -eq '2') { $Uninstall = $true }
+        elseif ($choice -eq '3') { $Credentials = $true }
         elseif ($choice -notin '', '1') { return }
+    }
+    if ($Install -and $Uninstall) { throw 'Выберите одну операцию.' }
+    if ($Credentials -or $CopyPassword) {
+        $file = Join-Path $stateRoot "$owner.xml"
+        if (!(Test-Path -LiteralPath $file)) { throw 'Пароль появится после создания локальной базы.' }
+        $credential = [PSCredential]::new($owner, (Import-Clixml -LiteralPath $file))
+        if ($Credentials) {
+            $path = Save-DesktopCredentials $credential
+            Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\notepad.exe') -ArgumentList ('"' + $path + '"')
+        } else {
+            $credential.GetNetworkCredential().Password | Set-Clipboard
+            Write-Host "Пароль для $owner скопирован в буфер обмена."
+        }
+        return
     }
 
     if (!$Uninstall) {
@@ -573,7 +589,7 @@ function Invoke-DeloSetup {
         Install-DesktopClient $root
         $programsFolder = Get-DesktopProgramsFolder
         Write-Step 'Настольное ДЕЛО готово. Проверены вход в базу и шесть ярлыков меню «Пуск».'
-        if ($InstallerDirectory) { Save-DesktopFiles $programsFolder $admin }
+        Save-DesktopFiles $programsFolder $admin
 
         if (Install-IisComponents) { Require-Restart }
         Initialize-LocalSite
@@ -593,9 +609,6 @@ function Invoke-DeloSetup {
         Set-Content -LiteralPath $shortcut -Value @('[InternetShortcut]', "URL=$siteUrl") -Encoding ASCII
         Write-Step "Установка проверена. $siteUrl"
         Write-Host "Логин администратора: $owner"
-        if (!$InstallerDirectory) {
-            $admin.GetNetworkCredential().Password | Set-Clipboard
-        }
     } finally {
         if ($held) { $lock.ReleaseMutex() }
         $lock.Dispose()
