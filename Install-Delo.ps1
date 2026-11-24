@@ -28,10 +28,10 @@ $vendorArchiveHash = '75026D10B3D0DE547AB40560BEB26156D6E7E50E6774EC057E684092F5
 $vendorSource = 'https://disk.yandex.ru/d/4FdxZceXFHLXcw'
 $githubArchive = 'https://github.com/NIDJEL/delo-22-setup/releases/download/v0.1.0/2025.05.27.1_Box_22.2.zip'
 $vendorManifestHash = '390B78953C1E681CE29795980E64FC117C5BD78D4EC0D7AC4A043E2E88CC5ACE'
-$windowsFeatures = @(
+$iisFeatures = @(
     'IIS-WebServerRole', 'IIS-WebServer', 'IIS-ManagementConsole', 'IIS-ASPNET45',
     'IIS-HttpRedirect', 'IIS-WebSockets', 'IIS-WindowsAuthentication',
-    'IIS-BasicAuthentication', 'IIS-ManagementScriptingTools', 'IIS-Metabase', 'NetFx3'
+    'IIS-BasicAuthentication', 'IIS-ManagementScriptingTools', 'IIS-Metabase'
 )
 
 $packages = @{
@@ -226,22 +226,27 @@ function Assert-DatabaseLogin([pscredential]$Admin) {
     }
 }
 
-function Install-WindowsFeatures {
-    $modernNet35 = [int](Get-CimInstance -ClassName Win32_OperatingSystem).BuildNumber -ge 28000
+function Enable-WindowsFeatureSet([string[]]$Names) {
     $toEnable = @()
-    foreach ($feature in $windowsFeatures) {
-        if ($modernNet35 -and $feature -eq 'NetFx3') { continue }
-        $value = (Get-WindowsOptionalFeature -Online -FeatureName $feature).State
-        if ($value -eq 'EnablePending') { return $true }
-        if ($value -ne 'Enabled') { $toEnable += $feature }
+    foreach ($name in $Names) {
+        $feature = Get-WindowsOptionalFeature -Online -FeatureName $name
+        if (!$feature) { throw "Компонент Windows $name недоступен в этой системе." }
+        if ($feature.State -eq 'EnablePending') { return $true }
+        if ($feature.State -ne 'Enabled') { $toEnable += $name }
     }
-    if ($toEnable.Count -gt 0) {
-        Write-Step 'Включение компонентов IIS и .NET Framework'
-        $result = Enable-WindowsOptionalFeature -Online -FeatureName $toEnable -All -NoRestart
-        if ($result.RestartNeeded -or !(Test-Path -LiteralPath $appcmd)) { return $true }
+    if ($toEnable.Count -eq 0) { return $false }
+    Write-Step ('Включение компонентов Windows ' + ($toEnable -join ', '))
+    $result = Enable-WindowsOptionalFeature -Online -FeatureName $toEnable -All -NoRestart
+    [bool]$result.RestartNeeded
+}
+
+function Install-Net35 {
+    $build = [int](Get-CimInstance -ClassName Win32_OperatingSystem).BuildNumber
+    if ($build -lt 28000) {
+        return (Enable-WindowsFeatureSet 'NetFx3')
     }
     $runtime = Join-Path $env:SystemRoot 'Microsoft.NET\Framework\v2.0.50727\mscorwks.dll'
-    if ($modernNet35 -and !(Test-Path -LiteralPath $runtime)) {
+    if (!(Test-Path -LiteralPath $runtime)) {
         $setup = Get-MicrosoftPackage Net35
         Write-Step 'Установка отдельного пакета .NET Framework 3.5 для Windows 11 26H1'
         if ((Start-Installer $setup @('/quiet','/norestart')) -eq 3010) { return $true }
@@ -257,6 +262,8 @@ function Get-IisModules {
 }
 
 function Install-IisComponents {
+    if (Enable-WindowsFeatureSet $iisFeatures) { return $true }
+    if (!(Test-Path -LiteralPath $appcmd)) { throw 'IIS включён, но appcmd.exe недоступен.' }
     foreach ($part in @(@('Rewrite','RewriteModule'), @('Routing','ApplicationRequestRouting'))) {
         if ((Get-IisModules).Contains($part[1])) { continue }
         $file = Get-MicrosoftPackage $part[0]
@@ -494,7 +501,7 @@ function Invoke-DeloSetup {
         if ((Test-Path -LiteralPath $clientIni) -and !(Test-ClientReady)) {
             throw 'Найден другой настольный клиент ДЕЛО. Этот установщик рассчитан на компьютер без настроенного клиента.'
         }
-        if (Install-WindowsFeatures) { Require-Restart }
+        if (Install-Net35) { Require-Restart }
         $existing = Get-Service -Name ('MSSQL$' + $instance) -ErrorAction SilentlyContinue
         if ($existing -and !(Test-Path -LiteralPath (Join-Path $stateRoot 'sa.xml'))) {
             throw "Экземпляр $instance уже используется другой установкой."
