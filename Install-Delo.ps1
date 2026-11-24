@@ -360,7 +360,10 @@ function Require-Restart {
 }
 
 function Install-DesktopClient([string]$Root) {
-    if (Test-ClientReady) { return }
+    if (Test-ClientReady) {
+        Write-Step 'Настольный клиент уже установлен.'
+        return
+    }
     $clientIni = Join-Path ${env:ProgramFiles(x86)} 'EOS\Delo\Office.ini'
     if (Test-Path -LiteralPath $clientIni) { throw 'Найден другой клиент ДЕЛО. Его настройки сохранены.' }
     $file = Join-Path $Root 'Client\setup.msi'
@@ -519,6 +522,8 @@ function Invoke-DeloSetup {
             Write-Step "Создание базы $database"
             Start-DatabaseWizard -Root $root -Server $sqlServer -Owner $owner -Sa $sa -Admin $admin -Assist:$ManualWizard
             if (!(Test-DeloDatabase)) { throw "Мастер не завершил создание $database." }
+        } else {
+            Write-Step "База $database уже создана."
         }
         Assert-DatabaseLogin $admin
         Install-DesktopClient $root
