@@ -215,10 +215,24 @@ function Get-SetupCredential([string]$Name) {
     [PSCredential]::new($Name, (Import-Clixml -LiteralPath $file))
 }
 
+function Open-LabSqlConnection([Data.SqlClient.SqlConnection]$Connection) {
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        try {
+            $Connection.Open()
+            return
+        } catch {
+            $failure = $_.Exception.InnerException
+            if ($attempt -eq 3 -or $failure -isnot [Data.SqlClient.SqlException] -or
+                $failure.Number -notin -2, 258) { throw }
+            Start-Sleep -Seconds 3
+        }
+    }
+}
+
 function Get-SqlScalar([string]$Catalog, [string]$Query) {
-    $connection = [Data.SqlClient.SqlConnection]::new("Data Source=lpc:$sqlServer;Initial Catalog=$Catalog;Integrated Security=True;Connect Timeout=5")
+    $connection = [Data.SqlClient.SqlConnection]::new("Data Source=lpc:$sqlServer;Initial Catalog=$Catalog;Integrated Security=True;Connect Timeout=40")
     try {
-        $connection.Open()
+        Open-LabSqlConnection $connection
         $command = $connection.CreateCommand()
         $command.CommandText = $Query
         $command.ExecuteScalar()
@@ -237,10 +251,10 @@ function Assert-DatabaseLogin([pscredential]$Admin) {
     $password.MakeReadOnly()
     $credential = [Data.SqlClient.SqlCredential]::new($Admin.UserName, $password)
     $connection = [Data.SqlClient.SqlConnection]::new(
-        "Data Source=lpc:$sqlServer;Initial Catalog=$database;Connect Timeout=5", $credential
+        "Data Source=lpc:$sqlServer;Initial Catalog=$database;Connect Timeout=40", $credential
     )
     try {
-        $connection.Open()
+        Open-LabSqlConnection $connection
     } catch {
         throw "Не удалось войти в базу $database как $($Admin.UserName)."
     } finally {
