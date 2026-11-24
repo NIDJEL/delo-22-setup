@@ -2,6 +2,7 @@
 param(
     [string]$SourceFolder,
     [uri]$ArchiveUrl,
+    [string]$InstallerDirectory,
     [switch]$Check,
     [switch]$DownloadOnly,
     [switch]$ManualWizard,
@@ -25,7 +26,7 @@ $statusPath = Join-Path $stateRoot 'setup.log'
 $appcmd = Join-Path $env:SystemRoot 'System32\inetsrv\appcmd.exe'
 $vendorArchiveHash = '75026D10B3D0DE547AB40560BEB26156D6E7E50E6774EC057E684092F5825E46'
 $vendorSource = 'https://disk.yandex.ru/d/4FdxZceXFHLXcw'
-$githubArchive = 'https://github.com/NIDJEL/delo-22-setup/releases/latest/download/2025.05.27.1_Box_22.2.zip'
+$githubArchive = 'https://github.com/NIDJEL/delo-22-setup/releases/download/v0.1.0/2025.05.27.1_Box_22.2.zip'
 $vendorManifestHash = '390B78953C1E681CE29795980E64FC117C5BD78D4EC0D7AC4A043E2E88CC5ACE'
 $windowsFeatures = @(
     'IIS-WebServerRole', 'IIS-WebServer', 'IIS-ManagementConsole', 'IIS-ASPNET45',
@@ -190,6 +191,23 @@ function Test-DeloDatabase {
     } catch { $false }
 }
 
+function Assert-DatabaseLogin([pscredential]$Admin) {
+    $password = $Admin.Password.Copy()
+    $password.MakeReadOnly()
+    $credential = [Data.SqlClient.SqlCredential]::new($Admin.UserName, $password)
+    $connection = [Data.SqlClient.SqlConnection]::new(
+        "Data Source=lpc:$sqlServer;Initial Catalog=$database;Connect Timeout=5", $credential
+    )
+    try {
+        $connection.Open()
+    } catch {
+        throw "Не удалось войти в базу $database как $($Admin.UserName)."
+    } finally {
+        $connection.Dispose()
+        $password.Dispose()
+    }
+}
+
 function Install-WindowsFeatures {
     $modernNet35 = [int](Get-CimInstance -ClassName Win32_OperatingSystem).BuildNumber -ge 28000
     $toEnable = @()
@@ -311,7 +329,8 @@ function Test-ClientReady {
 }
 
 function Require-Restart {
-    Write-Step 'Перезагрузите Windows и снова запустите Start-Delo-Setup.cmd. Установленные компоненты и скачанные файлы сохранятся.'
+    $launcher = if ($InstallerDirectory) { 'Delo-Setup.exe' } else { 'Start-Delo-Setup.cmd' }
+    Write-Step "Перезагрузите Windows и снова запустите $launcher. Установленные компоненты и скачанные файлы сохранятся."
     exit 3010
 }
 
@@ -328,6 +347,70 @@ function Install-DesktopClient([string]$Root) {
     )
     if ($code -eq 3010) { Require-Restart }
     if (!(Test-ClientReady)) { throw 'Не удалось подтвердить конфигурацию настольного клиента.' }
+}
+
+function Get-DesktopProgramsFolder {
+    $shortcuts = 'Документы', 'Отчетные формы', 'Подсистема протоколирования',
+        'Пользователи', 'Поточное сканирование', 'Справочники'
+    foreach ($name in 'CommonPrograms', 'Programs') {
+        $folder = Join-Path ([Environment]::GetFolderPath($name)) 'Дело'
+        $missing = @($shortcuts | Where-Object {
+            !(Test-Path -LiteralPath (Join-Path $folder "$_.lnk") -PathType Leaf)
+        })
+        if ($missing.Count -eq 0) { return $folder }
+    }
+    throw 'В меню «Пуск» не удалось найти папку «Дело» со всеми шестью ярлыками.'
+}
+
+function Get-AdjacentOutputPath([string]$Name, [scriptblock]$CanReuse) {
+    $stem = [IO.Path]::GetFileNameWithoutExtension($Name)
+    $extension = [IO.Path]::GetExtension($Name)
+    for ($index = 1; ; $index++) {
+        $filename = if ($index -eq 1) { $Name } else { "$stem ($index)$extension" }
+        $path = Join-Path $InstallerDirectory $filename
+        $item = Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+        if (!$item) { return $path }
+        if (!$item.PSIsContainer -and !$item.Attributes.HasFlag([IO.FileAttributes]::ReparsePoint) -and
+            (& $CanReuse $path)) { return $path }
+    }
+}
+
+function Save-DesktopFiles([string]$ProgramsFolder, [pscredential]$Admin) {
+    $contents = @(
+        'Учебная установка ДЕЛО 22.2'
+        ''
+        "Логин: $($Admin.UserName)"
+        "Пароль: $($Admin.GetNetworkCredential().Password)"
+        "ДЕЛО-Web: $siteUrl"
+    ) -join "`r`n"
+    $contents += "`r`n"
+
+    $credentials = Get-AdjacentOutputPath 'Дело - вход.txt' {
+        param($path)
+        [IO.File]::ReadAllText($path) -ceq $contents
+    }
+    if (!(Test-Path -LiteralPath $credentials)) {
+        $file = [IO.File]::Open($credentials, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+        try {
+            $writer = [IO.StreamWriter]::new($file, [Text.UTF8Encoding]::new($true))
+            try { $writer.Write($contents) } finally { $writer.Dispose() }
+        } finally { $file.Dispose() }
+    }
+    Write-Step "Данные входа сохранены в файле $credentials"
+
+    $shell = New-Object -ComObject WScript.Shell
+    $shortcut = Get-AdjacentOutputPath 'Дело.lnk' {
+        param($path)
+        try { $shell.CreateShortcut($path).TargetPath -ieq $ProgramsFolder } catch { $false }
+    }
+    if (!(Test-Path -LiteralPath $shortcut)) {
+        $link = $shell.CreateShortcut($shortcut)
+        $link.TargetPath = $ProgramsFolder
+        $link.WorkingDirectory = $ProgramsFolder
+        $link.Description = 'Настольные модули ДЕЛО'
+        $link.Save()
+    }
+    Write-Step "Ярлык на настольные модули сохранён в файле $shortcut"
 }
 
 function Show-Preflight {
@@ -369,6 +452,7 @@ function Invoke-DeloSetup {
         $arguments = @('-NoLogo','-NoProfile','-ExecutionPolicy','RemoteSigned','-File', ('"' + $PSCommandPath + '"'))
         if ($SourceFolder) { $arguments += @('-SourceFolder', ('"' + (Resolve-Path -LiteralPath $SourceFolder).Path + '"')) }
         if ($ArchiveUrl) { $arguments += @('-ArchiveUrl', ('"' + $ArchiveUrl.AbsoluteUri + '"')) }
+        if ($InstallerDirectory) { $arguments += @('-InstallerDirectory', ('"' + $InstallerDirectory + '"')) }
         if ($ManualWizard) { $arguments += '-ManualWizard' }
         $child = Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') -Verb RunAs -ArgumentList $arguments -Wait -PassThru
         exit $child.ExitCode
@@ -392,7 +476,6 @@ function Invoke-DeloSetup {
             throw 'Найден другой настольный клиент ДЕЛО. Этот установщик рассчитан на компьютер без настроенного клиента.'
         }
         if (Install-WindowsFeatures) { Require-Restart }
-        if (Install-IisComponents) { Require-Restart }
         $existing = Get-Service -Name ('MSSQL$' + $instance) -ErrorAction SilentlyContinue
         if ($existing -and !(Test-Path -LiteralPath (Join-Path $stateRoot 'sa.xml'))) {
             throw "Экземпляр $instance уже используется другой установкой."
@@ -411,6 +494,13 @@ function Invoke-DeloSetup {
             Start-DatabaseWizard -Root $root -Server $sqlServer -Owner $owner -Sa $sa -Admin $admin -Assist:$ManualWizard
             if (!(Test-DeloDatabase)) { throw "Мастер не завершил создание $database." }
         }
+        Assert-DatabaseLogin $admin
+        Install-DesktopClient $root
+        $programsFolder = Get-DesktopProgramsFolder
+        Write-Step 'Настольное ДЕЛО готово. Проверены вход в базу и шесть ярлыков меню «Пуск».'
+        if ($InstallerDirectory) { Save-DesktopFiles $programsFolder $admin }
+
+        if (Install-IisComponents) { Require-Restart }
         Initialize-LocalSite
         if (!(Test-WebReady)) {
             Write-Step "Установка ДЕЛО-Web на $siteUrl"
@@ -422,14 +512,17 @@ function Invoke-DeloSetup {
             }
             if (!$ready) { throw "Страница входа пока не открывается по адресу $siteUrl." }
         }
-        Install-DesktopClient $root
         $shortcut = Join-Path ([Environment]::GetFolderPath('Programs')) 'DELO 22.2 Web.url'
         Set-Content -LiteralPath $shortcut -Value @('[InternetShortcut]', "URL=$siteUrl") -Encoding ASCII
         Write-Step "Установка проверена. $siteUrl"
         Write-Host "Логин администратора: $owner"
-        $null = Read-Host 'Нажмите Enter, чтобы скопировать пароль и открыть страницу входа'
-        $admin.GetNetworkCredential().Password | Set-Clipboard
-        Start-Process $siteUrl
+        if ($InstallerDirectory) {
+            Start-Process -FilePath "$env:SystemRoot\explorer.exe" -ArgumentList ('"' + $programsFolder + '"')
+        } else {
+            $null = Read-Host 'Нажмите Enter, чтобы скопировать пароль и открыть страницу входа'
+            $admin.GetNetworkCredential().Password | Set-Clipboard
+            Start-Process $siteUrl
+        }
     } finally {
         if ($held) { $lock.ReleaseMutex() }
         $lock.Dispose()
