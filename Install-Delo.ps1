@@ -567,6 +567,24 @@ function Save-DesktopFiles([string]$ProgramsFolder, [pscredential]$Admin) {
     }
 }
 
+function Use-ExistingDesktopClient([string]$IniPath) {
+    $root = Split-Path $IniPath -Parent
+    if (!(Test-Path -LiteralPath (Join-Path $root 'Bin\base32.exe') -PathType Leaf)) {
+        throw 'Найдена конфигурация ДЕЛО, но исполняемый файл настольного клиента отсутствует.'
+    }
+    $config = Get-Content -LiteralPath $IniPath -Raw -Encoding Default
+    $section = [regex]::Match($config, '(?ims)^[ \t]*\[Database\][ \t]*\r?\n(?<settings>.*?)(?=^[ \t]*\[|\z)')
+    $settings = if ($section.Success) { $section.Groups['settings'].Value } else { $config }
+    $server = [regex]::Match($settings, '(?im)^[ \t]*ServerName[ \t]*=[ \t]*([^\r\n]+)').Groups[1].Value.Trim()
+    $databaseOwner = [regex]::Match($settings, '(?im)^[ \t]*(?:Owner|DBOwner)[ \t]*=[ \t]*([^\r\n]+)').Groups[1].Value.Trim()
+    if (!$server -or !$databaseOwner) { throw 'В существующем подключении ДЕЛО отсутствует сервер или владелец базы.' }
+    $programs = Get-DesktopProgramsFolder
+    $shortcut = Save-AdjacentShortcut 'Дело.lnk' $programs '' 'Настольные модули ДЕЛО'
+    New-Item -ItemType Directory -Path $stateRoot -Force | Out-Null
+    Write-Step "Используется установленное ДЕЛО. Сервер $server, владелец базы $databaseOwner."
+    Write-Step "Ярлык на существующие модули сохранён в файле $shortcut"
+}
+
 function Show-Preflight {
     if (![Environment]::Is64BitProcess -or $env:PROCESSOR_ARCHITECTURE -ne 'AMD64') {
         throw 'Нужен Windows x64 на процессоре Intel или AMD.'
@@ -585,7 +603,7 @@ function Invoke-DeloSetup {
     if ($Menu) {
         Write-Host 'ДЕЛО 22.2'
         Write-Host '1. Установить или продолжить'
-        Write-Host '2. Удалить ДЕЛО и скачанные файлы'
+        Write-Host '2. Удалить учебное ДЕЛО LAB22 и скачанные файлы'
         Write-Host '3. Открыть TXT с логином и паролем'
         $choice = ([string](Read-Host 'Введите 1, 2 или 3')).Trim()
         if ($choice -eq '2') { $Uninstall = $true }
@@ -608,12 +626,10 @@ function Invoke-DeloSetup {
         return
     }
 
-    if (!$Uninstall) {
-        Show-Preflight
-        if ($Check) { return }
-        New-Item -ItemType Directory -Path $cache -Force | Out-Null
-    }
+    if ($Check -and !$Uninstall) { Show-Preflight; return }
     if ($DownloadOnly) {
+        Show-Preflight
+        New-Item -ItemType Directory -Path $cache -Force | Out-Null
         foreach ($item in 'Rewrite','Routing','Hosting','SqlBootstrap') { Get-MicrosoftPackage $item | Out-Null }
         Assert-VendorFiles (Get-VendorRoot)
         Write-Step 'Загрузки и контрольные суммы проверены.'
@@ -657,12 +673,16 @@ function Invoke-DeloSetup {
             Clear-SetupResume
             return
         }
+        $clientIni = Join-Path ${env:ProgramFiles(x86)} 'EOS\Delo\Office.ini'
+        if ((Test-Path -LiteralPath $clientIni -PathType Leaf) -and
+            (!(Test-ClientReady) -or !(Test-Path -LiteralPath (Join-Path $stateRoot 'sa.xml')))) {
+            Use-ExistingDesktopClient $clientIni
+            return
+        }
+        Show-Preflight
+        New-Item -ItemType Directory -Path $cache -Force | Out-Null
         $root = Get-VendorRoot
         Assert-VendorFiles $root
-        $clientIni = Join-Path ${env:ProgramFiles(x86)} 'EOS\Delo\Office.ini'
-        if ((Test-Path -LiteralPath $clientIni) -and !(Test-ClientReady)) {
-            throw 'Найден другой настольный клиент ДЕЛО. Этот установщик рассчитан на компьютер без настроенного клиента.'
-        }
         if (Install-Net35) { Require-Restart }
         $existing = Get-Service -Name ('MSSQL$' + $instance) -ErrorAction SilentlyContinue
         if ($existing -and !(Test-Path -LiteralPath (Join-Path $stateRoot 'sa.xml'))) {
