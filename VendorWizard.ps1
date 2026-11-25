@@ -377,7 +377,7 @@ function Close-CompletedWebWizard {
 
 function Get-WebWizardStage([Windows.Automation.AutomationElement]$Window, [array]$Pages) {
     if (Test-WebWizardMissingField $Window) {
-        throw [TimeoutException]::new('Мастер отклонил заполненные реквизиты. Закройте предупреждение и заполните поля вручную.')
+        throw [TimeoutException]::new('Мастер отклонил параметры подключения к серверу базы.')
     }
     for ($step = $Pages.Count - 1; $step -ge 1; $step--) {
         if (Find-WizardControl $Window $Pages[$step][0] $Pages[$step][1]) { return $step }
@@ -388,7 +388,7 @@ function Get-WebWizardStage([Windows.Automation.AutomationElement]$Window, [arra
             ([DeloDialog]::WindowClass([IntPtr]$control.Current.NativeWindowHandle) -eq 'msctls_progress32' -or
                 $control.Current.Name -match '^(?:&)?(?:Готово|Завершить|Закрыть)$')) { return $Pages.Count }
     }
-    throw [TimeoutException]::new('Текущий экран мастера требует ручного продолжения.')
+    throw [TimeoutException]::new('Не удалось определить текущий экран мастера серверной части.')
 }
 
 function Invoke-WebWizard {

@@ -49,7 +49,8 @@ function Remove-DeloIisApps([string]$WebFiles) {
         $path = & $appcmd list vdir "$name/" /text:physicalPath
         if ($LASTEXITCODE -ne 0 -or !$path) { throw "Не удалось проверить папку приложения IIS $name." }
         $resolved = [IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($path)).TrimEnd('\')
-        if (!$resolved.StartsWith(($WebFiles.TrimEnd('\') + '\'), [StringComparison]::OrdinalIgnoreCase)) { continue }
+        if ($resolved -ine $WebFiles -and
+            !$resolved.StartsWith(($WebFiles.TrimEnd('\') + '\'), [StringComparison]::OrdinalIgnoreCase)) { continue }
         $null = & $appcmd delete app $name
         if ($LASTEXITCODE -ne 0) { throw "Не удалось удалить приложение IIS $name." }
         Write-Step "Приложение IIS $name удалено."
@@ -135,6 +136,27 @@ function Remove-LabShortcuts {
         (Join-Path $startMenu 'Дело')
     )
     $shell = New-Object -ComObject WScript.Shell
+    if ($removeDesktop) {
+        $moduleRoot = $desktop + '\'
+        foreach ($folder in ($programFolders | Select-Object -Unique)) {
+            $entry = Get-Item -LiteralPath $folder -ErrorAction SilentlyContinue
+            if (!$entry -or !$entry.PSIsContainer -or $entry.Attributes.HasFlag([IO.FileAttributes]::ReparsePoint)) { continue }
+            $removedModule = $false
+            foreach ($module in $desktopModules) {
+                $path = Join-Path $folder "$module.lnk"
+                $file = Get-Item -LiteralPath $path -ErrorAction SilentlyContinue
+                if (!$file -or $file.PSIsContainer -or $file.Attributes.HasFlag([IO.FileAttributes]::ReparsePoint)) { continue }
+                $link = $shell.CreateShortcut($file.FullName)
+                if (([string]$link.TargetPath).StartsWith($moduleRoot, [StringComparison]::OrdinalIgnoreCase)) {
+                    Remove-Item -LiteralPath $file.FullName
+                    $removedModule = $true
+                }
+            }
+            if ($removedModule -and !(Get-ChildItem -LiteralPath $folder -Force | Select-Object -First 1)) {
+                [IO.Directory]::Delete($folder)
+            }
+        }
+    }
     foreach ($folder in ($folders | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Container) } | Select-Object -Unique)) {
         foreach ($file in (Get-ChildItem -LiteralPath $folder -File)) {
             if ($file.Attributes.HasFlag([IO.FileAttributes]::ReparsePoint)) { continue }
@@ -268,7 +290,9 @@ function Invoke-DeloUninstall {
             throw 'Сначала завершите или закройте открытый мастер серверной части.'
         }
     }
-    if ($isLabRemoval -and (Test-DeloDatabase)) { Close-CompletedDatabaseWizard (Join-Path $cache 'Delo22-20250527') $owner }
+    if ($isLabRemoval -and (Get-Service -Name ('MSSQL$' + $instance) -ErrorAction SilentlyContinue) -and (Test-DeloDatabase)) {
+        Close-CompletedDatabaseWizard (Join-Path $cache 'Delo22-20250527') $owner
+    }
 
     $webProduct = "ДЕЛО (серверная часть) - $owner"
     $webFiles = Join-Path $eosRoot "DeloServer\$owner"

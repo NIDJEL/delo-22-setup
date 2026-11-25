@@ -330,20 +330,31 @@ function Install-SqlServer([pscredential]$Sa) {
     if (!$service) {
         $media = Join-Path $cache 'SQLMedia'
         New-Item -ItemType Directory -Path $media -Force | Out-Null
-        $express = @(Get-ChildItem -LiteralPath $media -Filter 'SQLEXPRADV_x64_*.exe' -File)
-        if ($express.Count -eq 0) {
+        $express = $null
+        foreach ($candidate in (Get-ChildItem -LiteralPath $media -Filter 'SQLEXPRADV_x64_*.exe' -File)) {
+            try {
+                Assert-Publisher $candidate.FullName 'CN=Microsoft Corporation'
+                $express = $candidate
+                break
+            } catch {
+                Write-Step "Удаляю неполный или повреждённый пакет $($candidate.Name)."
+                Remove-Item -LiteralPath $candidate.FullName -Force
+            }
+        }
+        if (!$express) {
             $bootstrap = Get-MicrosoftPackage SqlBootstrap
             Write-Step 'Загрузка SQL Server 2019 Express Advanced'
             $null = Start-Installer $bootstrap @('/ACTION=Download', '/MEDIATYPE=Advanced', ('/MEDIAPATH="' + $media + '"'), '/QUIET')
-            $express = @(Get-ChildItem -LiteralPath $media -Filter 'SQLEXPRADV_x64_*.exe' -File)
+            $downloaded = @(Get-ChildItem -LiteralPath $media -Filter 'SQLEXPRADV_x64_*.exe' -File)
+            if ($downloaded.Count -ne 1) { throw 'Не найден пакет SQL Server 2019 Express Advanced.' }
+            $express = $downloaded[0]
+            Assert-Publisher $express.FullName 'CN=Microsoft Corporation'
         }
-        if ($express.Count -ne 1) { throw 'Не найден пакет SQL Server 2019 Express Advanced.' }
-        Assert-Publisher $express[0].FullName 'CN=Microsoft Corporation'
         $extract = Join-Path $cache 'SQLSetup'
         $setup = Join-Path $extract 'SETUP.EXE'
         if (!(Test-Path -LiteralPath $setup)) {
             New-Item -ItemType Directory -Path $extract -Force | Out-Null
-            $null = Start-Installer $express[0].FullName @(('/x:"' + $extract + '"'), '/q')
+            $null = Start-Installer $express.FullName @(('/x:"' + $extract + '"'), '/q')
         }
         Assert-Publisher $setup 'CN=Microsoft Corporation'
         $account = [Security.Principal.WindowsIdentity]::GetCurrent().Name
@@ -495,12 +506,13 @@ function Restore-DeloDateFormat {
     }
 }
 
+$desktopModules = 'Документы', 'Отчетные формы', 'Подсистема протоколирования',
+    'Пользователи', 'Поточное сканирование', 'Справочники'
+
 function Get-DesktopProgramsFolder {
-    $shortcuts = 'Документы', 'Отчетные формы', 'Подсистема протоколирования',
-        'Пользователи', 'Поточное сканирование', 'Справочники'
     foreach ($name in 'CommonPrograms', 'Programs') {
         $folder = Join-Path ([Environment]::GetFolderPath($name)) 'Дело'
-        $missing = @($shortcuts | Where-Object {
+        $missing = @($desktopModules | Where-Object {
             !(Test-Path -LiteralPath (Join-Path $folder "$_.lnk") -PathType Leaf)
         })
         if ($missing.Count -eq 0) { return $folder }
