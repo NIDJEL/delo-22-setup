@@ -197,7 +197,7 @@ function Assert-VendorFiles([string]$Root) {
 }
 
 function Start-Installer([string]$File, [string[]]$Arguments) {
-    $process = Start-Process -FilePath $File -ArgumentList $Arguments -WindowStyle Hidden -Wait -PassThru
+    $process = Start-Process -FilePath $File -ArgumentList $Arguments -NoNewWindow -Wait -PassThru
     if ($process.ExitCode -notin 0, 3010) {
         throw ('Ошибка установщика ' + (Split-Path $File -Leaf) + ', код ' + $process.ExitCode)
     }
@@ -386,13 +386,21 @@ function Test-WebReady {
     $LASTEXITCODE -eq 0 -and $http -match ('^200 ' + [regex]::Escape($siteUrl) + '.*login')
 }
 
+function Get-DesktopClientConnection([string]$IniPath) {
+    if (!(Test-Path -LiteralPath $IniPath -PathType Leaf)) { return }
+    $config = [string](Get-Content -LiteralPath $IniPath -Raw -Encoding Default)
+    $section = [regex]::Match($config, '(?ims)^[ \t]*\[Database\][ \t]*\r?\n(?<settings>.*?)(?=^[ \t]*\[|\z)')
+    $settings = if ($section.Success) { $section.Groups['settings'].Value } else { $config }
+    $server = [regex]::Match($settings, '(?im)^[ \t]*ServerName[ \t]*=[ \t]*([^\r\n]+)').Groups[1].Value.Trim()
+    $databaseOwner = [regex]::Match($settings, '(?im)^[ \t]*(?:Owner|DBOwner)[ \t]*=[ \t]*([^\r\n]+)').Groups[1].Value.Trim()
+    if ($server -and $databaseOwner) { [pscustomobject]@{ Server = $server; Owner = $databaseOwner } }
+}
+
 function Test-ClientReady {
     $root = Join-Path ${env:ProgramFiles(x86)} 'EOS\Delo'
-    $ini = Join-Path $root 'Office.ini'
-    if (!(Test-Path -LiteralPath $ini) -or !(Test-Path -LiteralPath (Join-Path $root 'Bin\base32.exe'))) { return $false }
-    $config = Get-Content -LiteralPath $ini -Raw -Encoding Default
-    $config -match ('(?im)^ServerName=' + [regex]::Escape($sqlServer) + '\s*$') -and
-        $config -match ('(?im)^(?:Owner|DBOwner)=' + [regex]::Escape($owner) + '\s*$')
+    $client = Get-DesktopClientConnection (Join-Path $root 'Office.ini')
+    $client -and $client.Server -ieq $sqlServer -and $client.Owner -ieq $owner -and
+        (Test-Path -LiteralPath (Join-Path $root 'Bin\base32.exe') -PathType Leaf)
 }
 
 function Get-SetupResumeTaskName {
@@ -447,14 +455,22 @@ function Install-DesktopClient([string]$Root) {
         return
     }
     $clientIni = Join-Path ${env:ProgramFiles(x86)} 'EOS\Delo\Office.ini'
-    if (Test-Path -LiteralPath $clientIni) { throw 'Найден другой клиент ДЕЛО. Его настройки сохранены.' }
+    $repair = Test-Path -LiteralPath $clientIni
+    if ($repair) {
+        $client = Get-DesktopClientConnection $clientIni
+        if (!$client -or $client.Server -ine $sqlServer -or $client.Owner -ine $owner) {
+            throw 'Найден другой клиент ДЕЛО. Его настройки сохранены.'
+        }
+    }
     $file = Join-Path $Root 'Client\setup.msi'
     $log = Join-Path $stateRoot 'client-msi.log'
     Write-Step 'Установка настольного клиента'
-    $code = Start-Installer "$env:SystemRoot\System32\msiexec.exe" @(
+    $arguments = @(
         '/i', ('"' + $file + '"'), '/qn', '/norestart', '/Le', ('"' + $log + '"'),
         'ISSETUPDRIVEN=1', 'DBTYPE=MSS', "DBSERVERNAME=$sqlServer", "DBOWNER=$owner", 'ADDLOCAL=ALL'
     )
+    if ($repair) { $arguments += 'REINSTALL=ALL', 'REINSTALLMODE=omus' }
+    $code = Start-Installer "$env:SystemRoot\System32\msiexec.exe" $arguments
     if ($code -eq 3010) { Require-Restart }
     if (!(Test-ClientReady)) { throw 'Не удалось подтвердить конфигурацию настольного клиента.' }
 }
@@ -572,16 +588,12 @@ function Use-ExistingDesktopClient([string]$IniPath) {
     if (!(Test-Path -LiteralPath (Join-Path $root 'Bin\base32.exe') -PathType Leaf)) {
         throw 'Найдена конфигурация ДЕЛО, но исполняемый файл настольного клиента отсутствует.'
     }
-    $config = Get-Content -LiteralPath $IniPath -Raw -Encoding Default
-    $section = [regex]::Match($config, '(?ims)^[ \t]*\[Database\][ \t]*\r?\n(?<settings>.*?)(?=^[ \t]*\[|\z)')
-    $settings = if ($section.Success) { $section.Groups['settings'].Value } else { $config }
-    $server = [regex]::Match($settings, '(?im)^[ \t]*ServerName[ \t]*=[ \t]*([^\r\n]+)').Groups[1].Value.Trim()
-    $databaseOwner = [regex]::Match($settings, '(?im)^[ \t]*(?:Owner|DBOwner)[ \t]*=[ \t]*([^\r\n]+)').Groups[1].Value.Trim()
-    if (!$server -or !$databaseOwner) { throw 'В существующем подключении ДЕЛО отсутствует сервер или владелец базы.' }
+    $client = Get-DesktopClientConnection $IniPath
+    if (!$client) { throw 'В существующем подключении ДЕЛО отсутствует сервер или владелец базы.' }
     $programs = Get-DesktopProgramsFolder
     $shortcut = Save-AdjacentShortcut 'Дело.lnk' $programs '' 'Настольные модули ДЕЛО'
     New-Item -ItemType Directory -Path $stateRoot -Force | Out-Null
-    Write-Step "Используется установленное ДЕЛО. Сервер $server, владелец базы $databaseOwner."
+    Write-Step "Используется установленное ДЕЛО. Сервер $($client.Server), владелец базы $($client.Owner)."
     Write-Step "Ярлык на существующие модули сохранён в файле $shortcut"
 }
 
@@ -603,7 +615,7 @@ function Invoke-DeloSetup {
     if ($Menu) {
         Write-Host 'ДЕЛО 22.2'
         Write-Host '1. Установить или продолжить'
-        Write-Host '2. Удалить учебное ДЕЛО LAB22 и скачанные файлы'
+        Write-Host '2. Удалить ДЕЛО'
         Write-Host '3. Открыть TXT с логином и паролем'
         $choice = ([string](Read-Host 'Введите 1, 2 или 3')).Trim()
         if ($choice -eq '2') { $Uninstall = $true }
@@ -613,6 +625,16 @@ function Invoke-DeloSetup {
     }
     if ($Install -and $Uninstall) { throw 'Выберите одну операцию.' }
     if ($Credentials -or $CopyPassword) {
+        $client = Get-DesktopClientConnection (Join-Path ${env:ProgramFiles(x86)} 'EOS\Delo\Office.ini')
+        if ($Credentials -and $client -and ($client.Server -ine $sqlServer -or $client.Owner -ine $owner)) {
+            $text = Get-ChildItem -LiteralPath $InstallerDirectory -File -Filter 'Дело - вход*.txt' | Where-Object {
+                $lines = [IO.File]::ReadAllLines($_.FullName)
+                "Логин: $($client.Owner)" -in $lines -and "Сервер БД: $($client.Server)" -in $lines
+            } | Select-Object -First 1
+            if (!$text) { throw 'Файл с данными входа существующего ДЕЛО рядом с установщиком не найден.' }
+            Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\notepad.exe') -ArgumentList ('"' + $text.FullName + '"')
+            return
+        }
         $file = Join-Path $stateRoot "$owner.xml"
         if (!(Test-Path -LiteralPath $file)) { throw 'Пароль появится после создания локальной базы.' }
         $credential = [PSCredential]::new($owner, (Import-Clixml -LiteralPath $file))
@@ -661,6 +683,9 @@ function Invoke-DeloSetup {
             Invoke-DeloUninstall
             return
         }
+        if (Test-Path -LiteralPath (Join-Path $stateRoot 'removal.json')) {
+            throw 'Удаление ДЕЛО ещё не завершено. Откройте меню и выберите пункт 2.'
+        }
         $pending = Join-Path $stateRoot 'pending-restart.txt'
         if (Test-Path -LiteralPath $pending) {
             $boot = (Get-CimInstance -ClassName Win32_OperatingSystem).LastBootUpTime.ToUniversalTime().Ticks
@@ -674,8 +699,10 @@ function Invoke-DeloSetup {
             return
         }
         $clientIni = Join-Path ${env:ProgramFiles(x86)} 'EOS\Delo\Office.ini'
+        $client = Get-DesktopClientConnection $clientIni
         if ((Test-Path -LiteralPath $clientIni -PathType Leaf) -and
-            (!(Test-ClientReady) -or !(Test-Path -LiteralPath (Join-Path $stateRoot 'sa.xml')))) {
+            (!$client -or $client.Server -ine $sqlServer -or $client.Owner -ine $owner -or
+                !(Test-Path -LiteralPath (Join-Path $stateRoot 'sa.xml')))) {
             Use-ExistingDesktopClient $clientIni
             return
         }
@@ -707,6 +734,7 @@ function Invoke-DeloSetup {
         Assert-DatabaseLogin $admin
         Close-CompletedDatabaseWizard $root $owner
         Install-DesktopClient $root
+        New-Item -ItemType File -Path (Join-Path $stateRoot 'desktop-owned') -Force | Out-Null
         $programsFolder = Get-DesktopProgramsFolder
         Set-DeloDateFormat
         Write-Step 'Настольное ДЕЛО готово. Проверены вход в базу и шесть ярлыков меню «Пуск».'
@@ -744,6 +772,9 @@ try {
     Invoke-DeloSetup
 } catch {
     $message = $_.Exception.Message -replace 'Delo!9a-[a-f0-9]{36}', '[пароль скрыт]'
+    if ($Install -and !(Test-Path -LiteralPath $stateRoot)) {
+        New-Item -ItemType Directory -Path $stateRoot -Force | Out-Null
+    }
     if (Test-Path -LiteralPath $stateRoot) { Write-Step "Остановка. $message" } else { Write-Host $message }
     Write-Host "Журнал: $statusPath"
     exit 1

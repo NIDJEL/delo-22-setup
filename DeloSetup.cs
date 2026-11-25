@@ -3,15 +3,19 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Text;
 
 [assembly: AssemblyTitle("Установщик ДЕЛО 22.2")]
 [assembly: AssemblyDescription("Локальная учебная установка ДЕЛО 22.2")]
-[assembly: AssemblyFileVersion("0.3.5.0")]
-[assembly: AssemblyVersion("0.3.5.0")]
+[assembly: AssemblyFileVersion("0.3.6.0")]
+[assembly: AssemblyVersion("0.3.6.0")]
 
 internal static class DeloSetup
 {
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr GetConsoleWindow();
+
     private static readonly string[] Resources =
     {
         "Install-Delo.ps1",
@@ -24,22 +28,67 @@ internal static class DeloSetup
     [STAThread]
     private static int Main(string[] args)
     {
-        int exitCode = 1;
+        bool background = false;
         try
         {
-            Console.Title = "Установка ДЕЛО 22.2";
             Console.OutputEncoding = Encoding.UTF8;
-            exitCode = RunInstaller(args);
+            IntPtr console = GetConsoleWindow();
+            if (console != IntPtr.Zero) Console.Title = "Установка ДЕЛО 22.2";
+            if (args.Length == 0 || (args.Length == 1 && args[0].Equals("-Menu", StringComparison.OrdinalIgnoreCase)))
+            {
+                Console.WriteLine("ДЕЛО 22.2");
+                Console.WriteLine("1. Установить или продолжить");
+                Console.WriteLine("2. Удалить ДЕЛО");
+                Console.WriteLine("3. Открыть TXT с логином и паролем");
+                Console.Write("Введите 1, 2 или 3: ");
+                string choice = ReadMenuChoice();
+                switch (choice)
+                {
+                    case "1":
+                        background = true;
+                        Console.WriteLine("Установка запущена в фоне. Журнал находится в %LOCALAPPDATA%\\Delo22Lab-Setup\\setup.log.");
+                        var worker = new ProcessStartInfo {
+                            FileName = Assembly.GetExecutingAssembly().Location,
+                            Arguments = "-Install",
+                            CreateNoWindow = true,
+                            UseShellExecute = false
+                        };
+                        using (Process process = Process.Start(worker)) { }
+                        return 0;
+                    case "2": args = new[] { "-Uninstall" }; break;
+                    case "3": args = new[] { "-Credentials" }; break;
+                    default: return 0;
+                }
+            }
+            background = args.Any(arg => arg.Equals("-Install", StringComparison.OrdinalIgnoreCase)) &&
+                !args.Any(arg => arg.Equals("-ManualWizard", StringComparison.OrdinalIgnoreCase));
+            return RunInstaller(args, background);
         }
         catch (Exception error)
         {
             Console.Error.WriteLine("Не удалось запустить установку. " + error.Message);
+            if (background)
+            {
+                string folder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Delo22Lab-Setup");
+                Directory.CreateDirectory(folder);
+                File.AppendAllText(Path.Combine(folder, "setup.log"), "Не удалось запустить установку. " + error.Message + Environment.NewLine);
+            }
+            return 1;
         }
-
-        return exitCode;
     }
 
-    private static int RunInstaller(string[] args)
+    private static string ReadMenuChoice()
+    {
+        if (!Console.IsInputRedirected) return (Console.ReadLine() ?? "").Trim();
+        // Leave any following lines for the PowerShell confirmation prompt.
+        var line = new StringBuilder();
+        Stream input = Console.OpenStandardInput();
+        int value;
+        while ((value = input.ReadByte()) >= 0 && value != '\n') line.Append((char)value);
+        return line.ToString().Trim();
+    }
+
+    private static int RunInstaller(string[] args, bool background)
     {
         Assembly assembly = Assembly.GetExecutingAssembly();
         string installerDirectory = Path.GetDirectoryName(assembly.Location);
@@ -68,14 +117,22 @@ internal static class DeloSetup
                 "-InstallerDirectory", installerDirectory,
                 "-InstallerPath", assembly.Location
             };
+            string powerShell = Path.Combine(powerShellDirectory, "powershell.exe");
+            string arguments = string.Join(" ", parameters.Concat(args).Select(QuoteArgument));
+            string modulePath = Path.Combine(powerShellDirectory, "Modules") +
+                ";" + Path.Combine(programFiles, @"WindowsPowerShell\Modules");
+            if (background)
+            {
+                Environment.SetEnvironmentVariable("PSModulePath", modulePath);
+                return BackgroundDesktop.Run(powerShell, QuoteArgument(powerShell) + " " + arguments, installerDirectory);
+            }
             var start = new ProcessStartInfo {
-                FileName = Path.Combine(powerShellDirectory, "powershell.exe"),
-                Arguments = string.Join(" ", parameters.Concat(args).Select(QuoteArgument)),
+                FileName = powerShell,
+                Arguments = arguments,
                 WorkingDirectory = installerDirectory,
                 UseShellExecute = false
             };
-            start.EnvironmentVariables["PSModulePath"] = Path.Combine(powerShellDirectory, "Modules") +
-                ";" + Path.Combine(programFiles, @"WindowsPowerShell\Modules");
+            start.EnvironmentVariables["PSModulePath"] = modulePath;
             using (Process process = Process.Start(start))
             {
                 process.WaitForExit();

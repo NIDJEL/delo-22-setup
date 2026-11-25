@@ -248,7 +248,7 @@ function Start-DatabaseWizard {
     if (Get-WizardWindow database) { throw 'Закройте уже открытый мастер баз данных.' }
     $directory = Join-Path $Root 'DBCreate'
     for ($attempt = 1; $attempt -le 2; $attempt++) {
-        $wizard = Start-Process -FilePath (Join-Path $directory 'dbmaster.exe') -WorkingDirectory $directory -PassThru
+        $wizard = Start-Process -FilePath (Join-Path $directory 'dbmaster.exe') -WorkingDirectory $directory -NoNewWindow -PassThru
         if ($Assist) { Show-DatabaseInstructions $Server $Owner $Sa $Admin; return }
         $creating = $false
         try {
@@ -333,7 +333,7 @@ function Start-VendorWebSetup([string]$Root, [string]$Server, [string]$Owner, [s
     $arguments = @('-NoProfile', '-ExecutionPolicy', 'RemoteSigned', '-File', ('"' + $worker + '"'),
         ('"' + $package + '"'), ('"' + $credential + '"'), $Server, $Owner, $SiteUrl)
     Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') -ArgumentList $arguments `
-        -WorkingDirectory $directory -PassThru -WindowStyle Hidden
+        -WorkingDirectory $directory -NoNewWindow -PassThru
 }
 
 function Get-SavedWebWizardProcess([string]$State) {

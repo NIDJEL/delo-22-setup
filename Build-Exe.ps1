@@ -16,6 +16,6 @@ foreach ($resource in $resources) {
     if (!(Test-Path -LiteralPath $path -PathType Leaf)) { throw "Не найден файл $path." }
     $arguments += "/resource:$path,$resource"
 }
-& $compiler @arguments (Join-Path $PSScriptRoot 'DeloSetup.cs')
+& $compiler @arguments (Join-Path $PSScriptRoot 'DeloSetup.cs') (Join-Path $PSScriptRoot 'BackgroundDesktop.cs')
 if ($LASTEXITCODE -ne 0) { throw "Ошибка сборки установщика, код $LASTEXITCODE." }
 Get-Item -LiteralPath $output
