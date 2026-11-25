@@ -8,8 +8,8 @@ using System.Text;
 
 [assembly: AssemblyTitle("Установщик ДЕЛО 22.2")]
 [assembly: AssemblyDescription("Локальная учебная установка ДЕЛО 22.2")]
-[assembly: AssemblyFileVersion("0.3.6.0")]
-[assembly: AssemblyVersion("0.3.6.0")]
+[assembly: AssemblyFileVersion("0.3.7.0")]
+[assembly: AssemblyVersion("0.3.7.0")]
 
 internal static class DeloSetup
 {
@@ -29,6 +29,7 @@ internal static class DeloSetup
     private static int Main(string[] args)
     {
         bool background = false;
+        bool showResult = false;
         try
         {
             Console.OutputEncoding = Encoding.UTF8;
@@ -40,41 +41,98 @@ internal static class DeloSetup
                 Console.WriteLine("1. Установить или продолжить");
                 Console.WriteLine("2. Удалить ДЕЛО");
                 Console.WriteLine("3. Открыть TXT с логином и паролем");
-                Console.Write("Введите 1, 2 или 3: ");
+                Console.WriteLine("4. Запустить ДЕЛО-Web");
+                Console.Write("Введите номер пункта: ");
                 string choice = ReadMenuChoice();
                 switch (choice)
                 {
                     case "1":
-                        background = true;
-                        Console.WriteLine("Установка запущена в фоне. Журнал находится в %LOCALAPPDATA%\\Delo22Lab-Setup\\setup.log.");
-                        var worker = new ProcessStartInfo {
-                            FileName = Assembly.GetExecutingAssembly().Location,
-                            Arguments = "-Install",
-                            CreateNoWindow = true,
-                            UseShellExecute = false
-                        };
-                        using (Process process = Process.Start(worker)) { }
-                        return 0;
+                        return ShowResult(FollowInstallation());
                     case "2": args = new[] { "-Uninstall" }; break;
                     case "3": args = new[] { "-Credentials" }; break;
+                    case "4": args = new[] { "-StartWeb" }; showResult = true; break;
                     default: return 0;
                 }
             }
             background = args.Any(arg => arg.Equals("-Install", StringComparison.OrdinalIgnoreCase)) &&
                 !args.Any(arg => arg.Equals("-ManualWizard", StringComparison.OrdinalIgnoreCase));
-            return RunInstaller(args, background);
+            int code = RunInstaller(args, background);
+            return showResult ? ShowResult(code) : code;
         }
         catch (Exception error)
         {
             Console.Error.WriteLine("Не удалось запустить установку. " + error.Message);
             if (background)
             {
-                string folder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Delo22Lab-Setup");
-                Directory.CreateDirectory(folder);
-                File.AppendAllText(Path.Combine(folder, "setup.log"), "Не удалось запустить установку. " + error.Message + Environment.NewLine);
+                Directory.CreateDirectory(Path.GetDirectoryName(LogPath));
+                File.AppendAllText(LogPath, "Не удалось запустить установку. " + error.Message + Environment.NewLine);
             }
             return 1;
         }
+    }
+
+    private static string LogPath
+    {
+        get
+        {
+            string folder = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            return Path.Combine(folder, "Delo22Lab-Setup", "setup.log");
+        }
+    }
+
+    private static int FollowInstallation()
+    {
+        string path = LogPath;
+        long position = File.Exists(path) ? new FileInfo(path).Length : 0;
+        Console.WriteLine("Установка началась. Ход работы будет показан ниже.");
+        var worker = new ProcessStartInfo {
+            FileName = Assembly.GetExecutingAssembly().Location,
+            Arguments = "-Install",
+            CreateNoWindow = true,
+            UseShellExecute = false
+        };
+        using (Process process = Process.Start(worker))
+        {
+            while (!process.WaitForExit(500)) ShowNewLogLines(path, ref position);
+            ShowNewLogLines(path, ref position);
+            return process.ExitCode;
+        }
+    }
+
+    private static void ShowNewLogLines(string path, ref long position)
+    {
+        try
+        {
+            using (var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+            {
+                if (stream.Length < position) position = 0;
+                long end = stream.Length;
+                if (end == position) return;
+                stream.Seek(position, SeekOrigin.Begin);
+                byte[] data = new byte[end - position];
+                int read = stream.Read(data, 0, data.Length);
+                if (read == 0) return;
+                int lastLine = Array.LastIndexOf(data, (byte)'\n', read - 1, read);
+                if (lastLine < 0) return;
+                Console.Write(Encoding.UTF8.GetString(data, 0, lastLine + 1).TrimStart('\uFEFF'));
+                position += lastLine + 1;
+            }
+        }
+        catch (IOException) { }
+    }
+
+    private static int ShowResult(int code)
+    {
+        if (code == 3010)
+            Console.WriteLine("Требуется перезагрузка Windows.");
+        else if (code != 0)
+            Console.WriteLine("Операция завершилась с ошибкой. Журнал находится в " + LogPath);
+        if (!Console.IsInputRedirected)
+        {
+            Console.Write("Нажмите Enter, чтобы закрыть окно: ");
+            Console.ReadLine();
+        }
+        return code;
     }
 
     private static string ReadMenuChoice()

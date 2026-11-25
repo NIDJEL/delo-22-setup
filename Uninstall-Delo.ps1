@@ -22,23 +22,23 @@ function Remove-DeloMsiProduct([string]$DisplayName) {
 
 function Remove-LabIisSite {
     if (!(Test-Path -LiteralPath $appcmd)) { return }
-    $sites = & $appcmd list site /text:name
-    if ($LASTEXITCODE -ne 0) { throw 'Не удалось проверить сайты IIS.' }
-    if ($siteName -notin $sites) { return }
-    $binding = & $appcmd list site $siteName /text:bindings
-    if ($LASTEXITCODE -ne 0) { throw 'Не удалось проверить привязку сайта.' }
-    $path = & $appcmd list vdir "$siteName/" /text:physicalPath
-    if ($LASTEXITCODE -ne 0) { throw 'Не удалось проверить папку сайта.' }
-    if ($binding -ne "http/127.0.0.1:${sitePort}:" -or $path -ne (Join-Path $stateRoot 'LocalSite')) {
-        throw "IIS: параметры сайта $siteName отличаются от параметров учебной установки."
+    $path = Get-LocalSiteRoot
+    if ($path) {
+        $apps = & $appcmd list app "/site.name:$siteName" /text:path
+        if ($LASTEXITCODE -ne 0 -or @($apps | Where-Object { $_ -notin '/', "/$owner", "/$owner/CoreHost" }).Count) {
+            throw "IIS: на сайте $siteName есть приложения с другими путями."
+        }
+        $null = & $appcmd delete site $siteName
+        if ($LASTEXITCODE -ne 0) { throw "Не удалось удалить сайт $siteName." }
+        Write-Step "Локальный сайт $siteName удалён."
     }
-    $apps = & $appcmd list app "/site.name:$siteName" /text:path
-    if ($LASTEXITCODE -ne 0 -or @($apps | Where-Object { $_ -notin '/', "/$owner", "/$owner/CoreHost" }).Count) {
-        throw "IIS: на сайте $siteName есть приложения с другими путями."
+    if (Test-Path -LiteralPath $siteRoot -PathType Container) {
+        $roots = & $appcmd list vdir /text:physicalPath
+        if ($LASTEXITCODE -ne 0) { throw 'Не удалось проверить оставшиеся папки сайтов IIS.' }
+        $folder = Get-Item -LiteralPath $siteRoot
+        if ($siteRoot -notin $roots -and !$folder.Attributes.HasFlag([IO.FileAttributes]::ReparsePoint) -and
+            !(Get-ChildItem -LiteralPath $siteRoot -Force | Select-Object -First 1)) { [IO.Directory]::Delete($siteRoot) }
     }
-    $null = & $appcmd delete site $siteName
-    if ($LASTEXITCODE -ne 0) { throw "Не удалось удалить сайт $siteName." }
-    Write-Step "Локальный сайт $siteName удалён."
 }
 
 function Remove-DeloIisApps([string]$WebFiles) {
@@ -122,11 +122,7 @@ function Remove-LabShortcuts {
         Remove-Item -LiteralPath $web
     }
 
-    $output = Join-Path $stateRoot 'output-directory.txt'
-    $folders = @($InstallerDirectory)
-    if (Test-Path -LiteralPath $output) {
-        $folders += Get-Content -LiteralPath $output -Encoding UTF8
-    }
+    if ($clearCache) { Remove-LegacyManagementShortcuts }
     $passwordFile = Join-Path $stateRoot "$owner.xml"
     $credentialText = if ($target.Lab -and (Test-Path -LiteralPath $passwordFile)) {
         Get-DesktopCredentialText ([PSCredential]::new($owner, (Import-Clixml -LiteralPath $passwordFile)))
@@ -157,18 +153,12 @@ function Remove-LabShortcuts {
             }
         }
     }
-    foreach ($folder in ($folders | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Container) } | Select-Object -Unique)) {
+    foreach ($folder in (Get-SetupOutputDirectories)) {
         foreach ($file in (Get-ChildItem -LiteralPath $folder -File)) {
             if ($file.Attributes.HasFlag([IO.FileAttributes]::ReparsePoint)) { continue }
             if ($file.Name -match '^Дело(?: \(\d+\))?\.lnk$') {
                 $linkTarget = $shell.CreateShortcut($file.FullName).TargetPath
                 if ($removeDesktop -and $linkTarget -in $programFolders) { Remove-Item -LiteralPath $file.FullName }
-            }
-            if ($clearCache -and $file.Name -match '^Дело - управление(?: \(\d+\))?\.lnk$') {
-                $link = $shell.CreateShortcut($file.FullName)
-                if ($link.Arguments -ceq '-Menu' -and $link.Description -ceq 'Управление учебной установкой ДЕЛО 22.2') {
-                    Remove-Item -LiteralPath $file.FullName
-                }
             }
             if ($credentialText -and $file.Name -match '^Дело - вход(?: \(\d+\))?\.txt$' -and
                 [IO.File]::ReadAllText($file.FullName) -ceq $credentialText) {

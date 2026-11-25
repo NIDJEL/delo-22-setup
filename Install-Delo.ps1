@@ -11,6 +11,7 @@ param(
     [switch]$DownloadOnly,
     [switch]$ManualWizard,
     [switch]$Credentials,
+    [switch]$StartWeb,
     [switch]$ResumeAfterRestart,
     [switch]$CopyPassword
 )
@@ -26,6 +27,7 @@ $sqlServer = ".\$instance"
 $siteName = 'Delo22Lab'
 $sitePort = 8765
 $siteUrl = "http://127.0.0.1:$sitePort/$owner/"
+$siteRoot = Join-Path $env:ProgramFiles 'Delo22Lab-Site'
 $deloShortDate = 'dd/MM/yyyy'
 $stateRoot = Join-Path $env:LOCALAPPDATA 'Delo22Lab-Setup'
 $cache = Join-Path $stateRoot 'Media'
@@ -371,30 +373,128 @@ function Install-SqlServer([pscredential]$Sa) {
     $false
 }
 
-function Initialize-LocalSite {
-    $path = Join-Path $stateRoot 'LocalSite'
-    New-Item -Path $path -ItemType Directory -Force | Out-Null
-    $binding = "http/127.0.0.1:${sitePort}:"
+function Get-LocalSiteRoot {
     $sites = & $appcmd list site /text:name
     if ($LASTEXITCODE -ne 0) { throw 'Не удалось проверить сайт IIS.' }
-    if ($siteName -in $sites) {
-        $site = & $appcmd list site $siteName /text:bindings
-        if ($LASTEXITCODE -ne 0) { throw 'Не удалось проверить привязку сайта IIS.' }
-        $existingPath = & $appcmd list vdir "$siteName/" /text:physicalPath
-        if ($LASTEXITCODE -ne 0 -or $site -ne $binding -or $existingPath -ne $path) {
-            throw "Сайт $siteName уже принадлежит другой установке."
+    if ($siteName -notin $sites) { return }
+    $binding = & $appcmd list site $siteName /text:bindings
+    if ($LASTEXITCODE -ne 0) { throw 'Не удалось проверить привязку сайта IIS.' }
+    $path = & $appcmd list vdir "$siteName/" /text:physicalPath
+    if ($LASTEXITCODE -ne 0 -or $binding -ne "http/127.0.0.1:${sitePort}:" -or
+        $path -notin $siteRoot, (Join-Path $stateRoot 'LocalSite')) {
+        throw "Сайт $siteName уже принадлежит другой установке."
+    }
+    $path
+}
+
+function Initialize-LocalSite([switch]$Existing) {
+    $path = Get-LocalSiteRoot
+    if ($Existing -and !$path) { throw 'ДЕЛО-Web ещё не установлено. Выберите пункт 1.' }
+    New-Item -Path $siteRoot -ItemType Directory -Force | Out-Null
+    if ((Get-Item -LiteralPath $siteRoot).Attributes.HasFlag([IO.FileAttributes]::ReparsePoint)) {
+        throw 'Папка сайта ДЕЛО-Web ссылается на другой каталог.'
+    }
+    if ($path) {
+        if ($path -ne $siteRoot) {
+            $null = & $appcmd set vdir "$siteName/" "/physicalPath:$siteRoot"
+            if ($LASTEXITCODE -ne 0) { throw 'Не удалось изменить папку сайта ДЕЛО-Web.' }
+            Write-Step "Локальный сайт перенесён в $siteRoot"
         }
         return
     }
     $conflicts = Get-NetTCPConnection -LocalPort $sitePort -State Listen -ErrorAction SilentlyContinue
     if ($conflicts) { throw "Локальный порт $sitePort уже занят." }
-    $null = & $appcmd add site "/name:$siteName" "/bindings:$binding" "/physicalPath:$path"
+    $null = & $appcmd add site "/name:$siteName" "/bindings:http/127.0.0.1:${sitePort}:" "/physicalPath:$siteRoot"
     if ($LASTEXITCODE -ne 0) { throw 'Не удалось создать локальный сайт IIS.' }
+}
+
+function Get-LocalWebPools {
+    $apps = & $appcmd list app "/site.name:$siteName" /text:path
+    if ($LASTEXITCODE -ne 0) { throw 'Не удалось прочитать приложения ДЕЛО-Web.' }
+    if ("/$owner" -notin $apps -or "/$owner/CoreHost" -notin $apps) { return }
+    $webRoot = Join-Path ${env:ProgramFiles(x86)} "EOS\DeloServer\$owner"
+    $paths = @(
+        @{ App = "$siteName/$owner"; Directory = 'Web'; PoolSuffix = '' },
+        @{ App = "$siteName/$owner/CoreHost"; Directory = 'config\Web\www'; PoolSuffix = '.CoreHost' }
+    )
+    foreach ($entry in $paths) {
+        $path = & $appcmd list vdir "$($entry.App)/" /text:physicalPath
+        if ($LASTEXITCODE -ne 0 -or $path -ne (Join-Path $webRoot $entry.Directory)) {
+            throw "IIS: путь приложения $($entry.App) отличается от пути учебной установки."
+        }
+        $pool = & $appcmd list app $entry.App /text:applicationPool
+        if ($LASTEXITCODE -ne 0 -or $pool -notmatch ('^Eos\.AppPool\.\d+\.' + [regex]::Escape($owner + $entry.PoolSuffix) + '$')) {
+            throw "IIS: не удалось подтвердить пул приложения $($entry.App)."
+        }
+        $pool
+    }
+}
+
+function Start-LocalWebSite([string[]]$Pools) {
+    $state = & $appcmd list site $siteName /text:state
+    if ($LASTEXITCODE -ne 0) { throw 'Не удалось проверить состояние сайта ДЕЛО-Web.' }
+    if ($state -ne 'Started') {
+        $null = & $appcmd start site $siteName
+        if ($LASTEXITCODE -ne 0) { throw 'Не удалось запустить сайт ДЕЛО-Web.' }
+    }
+    foreach ($pool in $Pools) {
+        $state = & $appcmd list apppool $pool /text:state
+        if ($LASTEXITCODE -ne 0) { throw "Не удалось проверить состояние пула IIS $pool." }
+        if ($state -ne 'Started') {
+            $null = & $appcmd start apppool $pool
+            if ($LASTEXITCODE -ne 0) { throw "Не удалось запустить пул IIS $pool." }
+            Write-Step "Пул IIS $pool запущен."
+        }
+    }
 }
 
 function Test-WebReady {
     $http = & curl.exe --noproxy '*' --location --max-redirs 6 --connect-timeout 3 --max-time 15 --silent --output NUL --write-out '%{http_code} %{url_effective}' $siteUrl
     $LASTEXITCODE -eq 0 -and $http -match ('^200 ' + [regex]::Escape($siteUrl) + '.*login')
+}
+
+function Wait-LocalWebSite {
+    for ($attempt = 1; $attempt -le 10; $attempt++) {
+        if (Test-WebReady) { return }
+        Start-Sleep -Seconds 3
+    }
+    throw "Страница входа не открылась по адресу $siteUrl. Проверьте журнал IIS и журнал установщика."
+}
+
+function Update-DeloEventFeed {
+    try {
+        $query = @'
+IF CONVERT(int, SERVERPROPERTY('EngineEdition')) = 4 AND dbo.check_app_sheduler() = 0
+BEGIN
+    EXEC dbo.eos_jp_evnt_feed_upload;
+    SELECT COUNT_BIG(*) FROM dbo.EVNT_QUEUE_ITEM;
+END;
+'@
+        $remaining = Get-SqlScalar $database $query
+        if ($null -ne $remaining) { Write-Step "Выполнена обработка очереди событий ДЕЛО. Осталось записей: $remaining." }
+    } catch {
+        Write-Step 'Не удалось обработать очередь событий ДЕЛО.'
+    }
+}
+
+function Start-DeloWeb {
+    $sql = Get-Service -Name ('MSSQL$' + $instance) -ErrorAction SilentlyContinue
+    if (!$sql -or !(Test-Path -LiteralPath (Join-Path $stateRoot 'sa.xml') -PathType Leaf) -or
+        !(Test-Path -LiteralPath $appcmd -PathType Leaf)) {
+        throw 'Сначала установите учебное ДЕЛО через пункт 1.'
+    }
+    if ($sql.Status -ne 'Running') { Start-Service -Name $sql.Name }
+    if (!(Test-DeloDatabase)) { throw "Учебная база $database недоступна." }
+    Start-Service -Name W3SVC
+    Initialize-LocalSite -Existing
+    $pools = @(Get-LocalWebPools)
+    if ($pools.Count -ne 2) { throw 'ДЕЛО-Web ещё не установлено. Выберите пункт 1.' }
+    Start-LocalWebSite $pools
+    Write-Step 'Проверка страницы входа в ДЕЛО-Web.'
+    Wait-LocalWebSite
+    Update-DeloEventFeed
+    Write-Step "ДЕЛО-Web доступно по адресу $siteUrl"
+    Start-Process $siteUrl
 }
 
 function Get-DesktopClientConnection([string]$IniPath) {
@@ -590,8 +690,28 @@ function Save-DesktopFiles([string]$ProgramsFolder, [pscredential]$Admin) {
     $null = Save-DesktopCredentials $Admin
     $shortcut = Save-AdjacentShortcut 'Дело.lnk' $ProgramsFolder '' 'Настольные модули ДЕЛО'
     Write-Step "Ярлык на настольные модули сохранён в файле $shortcut"
-    if (Test-Path -LiteralPath $InstallerPath -PathType Leaf) {
-        $null = Save-AdjacentShortcut 'Дело - управление.lnk' $InstallerPath '-Menu' 'Управление учебной установкой ДЕЛО 22.2'
+}
+
+function Get-SetupOutputDirectories {
+    $folders = @($InstallerDirectory)
+    $record = Join-Path $stateRoot 'output-directory.txt'
+    if (Test-Path -LiteralPath $record -PathType Leaf) {
+        $folders += Get-Content -LiteralPath $record -Encoding UTF8
+    }
+    $folders | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Container) } | Select-Object -Unique
+}
+
+function Remove-LegacyManagementShortcuts {
+    $shell = New-Object -ComObject WScript.Shell
+    foreach ($folder in (Get-SetupOutputDirectories)) {
+        foreach ($file in (Get-ChildItem -LiteralPath $folder -File -Filter 'Дело - управление*.lnk')) {
+            if ($file.Attributes.HasFlag([IO.FileAttributes]::ReparsePoint) -or
+                $file.Name -notmatch '^Дело - управление(?: \(\d+\))?\.lnk$') { continue }
+            $link = $shell.CreateShortcut($file.FullName)
+            if ($link.Arguments -ceq '-Menu' -and $link.Description -ceq 'Управление учебной установкой ДЕЛО 22.2') {
+                Remove-Item -LiteralPath $file.FullName
+            }
+        }
     }
 }
 
@@ -629,13 +749,15 @@ function Invoke-DeloSetup {
         Write-Host '1. Установить или продолжить'
         Write-Host '2. Удалить ДЕЛО'
         Write-Host '3. Открыть TXT с логином и паролем'
-        $choice = ([string](Read-Host 'Введите 1, 2 или 3')).Trim()
+        Write-Host '4. Запустить ДЕЛО-Web'
+        $choice = ([string](Read-Host 'Введите номер пункта')).Trim()
         if ($choice -eq '2') { $Uninstall = $true }
         elseif ($choice -eq '3') { $Credentials = $true }
         elseif ($choice -eq '1') { $Install = $true }
+        elseif ($choice -eq '4') { $StartWeb = $true }
         else { return }
     }
-    if ($Install -and $Uninstall) { throw 'Выберите одну операцию.' }
+    if (($Install -and $Uninstall) -or ($StartWeb -and ($Install -or $Uninstall))) { throw 'Выберите одну операцию.' }
     if ($Credentials -or $CopyPassword) {
         $client = Get-DesktopClientConnection (Join-Path ${env:ProgramFiles(x86)} 'EOS\Delo\Office.ini')
         if ($Credentials -and $client -and ($client.Server -ine $sqlServer -or $client.Owner -ine $owner)) {
@@ -680,7 +802,9 @@ function Invoke-DeloSetup {
         if ($InstallerPath) { $arguments += @('-InstallerPath', ('"' + $InstallerPath + '"')) }
         if ($ManualWizard) { $arguments += '-ManualWizard' }
         if ($ResumeAfterRestart) { $arguments += '-ResumeAfterRestart' }
-        if ($Uninstall) { $arguments += '-Uninstall' } else { $arguments += '-Install' }
+        if ($Uninstall) { $arguments += '-Uninstall' }
+        elseif ($StartWeb) { $arguments += '-StartWeb' }
+        else { $arguments += '-Install' }
         $child = Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') -Verb RunAs -ArgumentList $arguments -Wait -PassThru
         exit $child.ExitCode
     }
@@ -697,6 +821,11 @@ function Invoke-DeloSetup {
         }
         if (Test-Path -LiteralPath (Join-Path $stateRoot 'removal.json')) {
             throw 'Удаление ДЕЛО ещё не завершено. Откройте меню и выберите пункт 2.'
+        }
+        Remove-LegacyManagementShortcuts
+        if ($StartWeb) {
+            Start-DeloWeb
+            return
         }
         $pending = Join-Path $stateRoot 'pending-restart.txt'
         if (Test-Path -LiteralPath $pending) {
@@ -751,25 +880,25 @@ function Invoke-DeloSetup {
         Set-DeloDateFormat
         Write-Step 'Настольное ДЕЛО готово. Проверены вход в базу и шесть ярлыков меню «Пуск».'
         Save-DesktopFiles $programsFolder $admin
+        Update-DeloEventFeed
 
         if (!(Get-WindowsOptionalFeature -Online -FeatureName 'IIS-WebServerRole')) {
             Write-Step 'В этом образе Windows недоступен IIS. Настольное ДЕЛО и TXT с данными входа готовы.'
             return
         }
         if (Install-IisComponents) { Require-Restart }
+        Start-Service -Name W3SVC
         Initialize-LocalSite
-        if (!(Test-WebReady)) {
+        $pools = @(Get-LocalWebPools)
+        if ($pools.Count -eq 2) {
+            Start-LocalWebSite $pools
+        } else {
             Write-Step "Установка ДЕЛО-Web на $siteUrl"
             Start-WebWizard -Root $root -Server $sqlServer -Owner $owner -Admin $admin -SiteName $siteName -SiteUrl $siteUrl -Assist:$ManualWizard
-            $ready = $false
-            for ($attempt = 1; $attempt -le 10; $attempt++) {
-                if (Test-WebReady) { $ready = $true; break }
-                Start-Sleep -Seconds 4
-            }
-            if (!$ready) { throw "Страница входа пока не открывается по адресу $siteUrl." }
-        } else {
-            $null = Close-CompletedWebWizard
         }
+        Write-Step 'Проверка страницы входа в ДЕЛО-Web.'
+        Wait-LocalWebSite
+        $null = Close-CompletedWebWizard
         $shortcut = Join-Path ([Environment]::GetFolderPath('Programs')) 'DELO 22.2 Web.url'
         Set-Content -LiteralPath $shortcut -Value @('[InternetShortcut]', "URL=$siteUrl") -Encoding ASCII
         Write-Step "Установка проверена. $siteUrl"
