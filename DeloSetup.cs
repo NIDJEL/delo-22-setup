@@ -8,8 +8,8 @@ using System.Text;
 
 [assembly: AssemblyTitle("Установщик ДЕЛО 22.2")]
 [assembly: AssemblyDescription("Локальная учебная установка ДЕЛО 22.2")]
-[assembly: AssemblyFileVersion("0.3.7.0")]
-[assembly: AssemblyVersion("0.3.7.0")]
+[assembly: AssemblyFileVersion("0.3.8.0")]
+[assembly: AssemblyVersion("0.3.8.0")]
 
 internal static class DeloSetup
 {
@@ -22,6 +22,7 @@ internal static class DeloSetup
         "VendorWizard.ps1",
         "Run-WebMsi.ps1",
         "Uninstall-Delo.ps1",
+        "Transfer-DeloDatabase.ps1",
         "VendorFiles.json"
     };
 
@@ -42,6 +43,8 @@ internal static class DeloSetup
                 Console.WriteLine("2. Удалить ДЕЛО");
                 Console.WriteLine("3. Открыть TXT с логином и паролем");
                 Console.WriteLine("4. Запустить ДЕЛО-Web");
+                Console.WriteLine("5. Экспортировать базу на другой ПК");
+                Console.WriteLine("6. Импортировать базу с другого ПК");
                 Console.Write("Введите номер пункта: ");
                 string choice = ReadMenuChoice();
                 switch (choice)
@@ -51,6 +54,8 @@ internal static class DeloSetup
                     case "2": args = new[] { "-Uninstall" }; break;
                     case "3": args = new[] { "-Credentials" }; break;
                     case "4": args = new[] { "-StartWeb" }; showResult = true; break;
+                    case "5": args = new[] { "-ExportDatabase" }; showResult = true; break;
+                    case "6": args = new[] { "-ImportDatabase" }; showResult = true; break;
                     default: return 0;
                 }
             }

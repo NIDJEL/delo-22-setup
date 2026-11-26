@@ -13,7 +13,10 @@ param(
     [switch]$Credentials,
     [switch]$StartWeb,
     [switch]$ResumeAfterRestart,
-    [switch]$CopyPassword
+    [switch]$CopyPassword,
+    [switch]$ExportDatabase,
+    [switch]$ImportDatabase,
+    [string]$TransferPath
 )
 
 $ErrorActionPreference = 'Stop'
@@ -242,24 +245,24 @@ function Get-SqlScalar([string]$Catalog, [string]$Query) {
     } finally { $connection.Dispose() }
 }
 
-function Test-DeloDatabase {
+function Test-DeloDatabase([string]$Catalog = $database) {
     try {
-        (Get-SqlScalar $database 'SELECT COUNT(*) FROM sys.tables') -ge 270 -and
-            (Get-SqlScalar $database 'SELECT COUNT(*) FROM dbo.USER_CL') -ge 1
+        (Get-SqlScalar $Catalog 'SELECT COUNT(*) FROM sys.tables') -ge 270 -and
+            (Get-SqlScalar $Catalog 'SELECT COUNT(*) FROM dbo.USER_CL') -ge 1
     } catch { $false }
 }
 
-function Assert-DatabaseLogin([pscredential]$Admin) {
+function Assert-DatabaseLogin([pscredential]$Admin, [string]$Catalog = $database) {
     $password = $Admin.Password.Copy()
     $password.MakeReadOnly()
     $credential = [Data.SqlClient.SqlCredential]::new($Admin.UserName, $password)
     $connection = [Data.SqlClient.SqlConnection]::new(
-        "Data Source=lpc:$sqlServer;Initial Catalog=$database;Connect Timeout=40", $credential
+        "Data Source=lpc:$sqlServer;Initial Catalog=$Catalog;Connect Timeout=40", $credential
     )
     try {
         Open-LabSqlConnection $connection
     } catch {
-        throw "Не удалось войти в базу $database как $($Admin.UserName)."
+        throw "Не удалось войти в базу $Catalog как $($Admin.UserName)."
     } finally {
         $connection.Dispose()
         $password.Dispose()
@@ -750,14 +753,27 @@ function Invoke-DeloSetup {
         Write-Host '2. Удалить ДЕЛО'
         Write-Host '3. Открыть TXT с логином и паролем'
         Write-Host '4. Запустить ДЕЛО-Web'
+        Write-Host '5. Экспортировать базу на другой ПК'
+        Write-Host '6. Импортировать базу с другого ПК'
         $choice = ([string](Read-Host 'Введите номер пункта')).Trim()
         if ($choice -eq '2') { $Uninstall = $true }
         elseif ($choice -eq '3') { $Credentials = $true }
         elseif ($choice -eq '1') { $Install = $true }
         elseif ($choice -eq '4') { $StartWeb = $true }
+        elseif ($choice -eq '5') { $ExportDatabase = $true }
+        elseif ($choice -eq '6') { $ImportDatabase = $true }
         else { return }
     }
     if (($Install -and $Uninstall) -or ($StartWeb -and ($Install -or $Uninstall))) { throw 'Выберите одну операцию.' }
+    if (($ExportDatabase -or $ImportDatabase) -and
+        @($ExportDatabase, $ImportDatabase, $Install, $Uninstall, $StartWeb, $Credentials, $CopyPassword, $Check,
+            $DownloadOnly | Where-Object { $_ }).Count -ne 1) {
+        throw 'Выберите одну операцию.'
+    }
+    if ($TransferPath) {
+        if (!$ExportDatabase -and !$ImportDatabase) { throw 'Путь переноса указывают при экспорте или импорте.' }
+        $TransferPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($TransferPath)
+    }
     if ($Credentials -or $CopyPassword) {
         $client = Get-DesktopClientConnection (Join-Path ${env:ProgramFiles(x86)} 'EOS\Delo\Office.ini')
         if ($Credentials -and $client -and ($client.Server -ine $sqlServer -or $client.Owner -ine $owner)) {
@@ -802,8 +818,11 @@ function Invoke-DeloSetup {
         if ($InstallerPath) { $arguments += @('-InstallerPath', ('"' + $InstallerPath + '"')) }
         if ($ManualWizard) { $arguments += '-ManualWizard' }
         if ($ResumeAfterRestart) { $arguments += '-ResumeAfterRestart' }
+        if ($TransferPath) { $arguments += @('-TransferPath', ('"' + $TransferPath + '"')) }
         if ($Uninstall) { $arguments += '-Uninstall' }
         elseif ($StartWeb) { $arguments += '-StartWeb' }
+        elseif ($ExportDatabase) { $arguments += '-ExportDatabase' }
+        elseif ($ImportDatabase) { $arguments += '-ImportDatabase' }
         else { $arguments += '-Install' }
         $child = Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') -Verb RunAs -ArgumentList $arguments -Wait -PassThru
         exit $child.ExitCode
@@ -814,6 +833,11 @@ function Invoke-DeloSetup {
     try {
         try { $held = $lock.WaitOne(0) } catch [Threading.AbandonedMutexException] { $held = $true }
         if (!$held) { throw 'Установщик уже открыт.' }
+        $transferState = Join-Path $stateRoot 'database-import.json'
+        if ($ExportDatabase -or $ImportDatabase -or (Test-Path -LiteralPath $transferState)) {
+            . (Join-Path $PSScriptRoot 'Transfer-DeloDatabase.ps1')
+            if (Test-Path -LiteralPath $transferState) { Complete-DeloDatabaseSwitch }
+        }
         if ($Uninstall) {
             . (Join-Path $PSScriptRoot 'Uninstall-Delo.ps1')
             Invoke-DeloUninstall
@@ -821,6 +845,16 @@ function Invoke-DeloSetup {
         }
         if (Test-Path -LiteralPath (Join-Path $stateRoot 'removal.json')) {
             throw 'Удаление ДЕЛО ещё не завершено. Откройте меню и выберите пункт 2.'
+        }
+        if ($ExportDatabase -or $ImportDatabase) {
+            if (!(Test-Path -LiteralPath (Join-Path $stateRoot 'sa.xml') -PathType Leaf) -or !(Test-ClientReady)) {
+                throw 'Для переноса установите ДЕЛО 22.2 через пункт 1 на этом ПК.'
+            }
+            Start-Service -Name ('MSSQL$' + $instance)
+            if (!(Test-DeloDatabase)) { throw "База $database недоступна. Проверьте установку через пункт 1." }
+            if ($ExportDatabase) { Export-DeloDatabase $TransferPath }
+            else { Import-DeloDatabase $TransferPath }
+            return
         }
         Remove-LegacyManagementShortcuts
         if ($StartWeb) {
@@ -912,7 +946,7 @@ function Invoke-DeloSetup {
 try {
     Invoke-DeloSetup
 } catch {
-    $message = $_.Exception.Message -replace 'Delo!9a-[a-f0-9]{36}', '[пароль скрыт]'
+    $message = $_.Exception.Message -replace 'Delo!9a-[a-f0-9]{36}', '[пароль скрыт]' -replace '(?i)0x[0-9a-f]{32,}', '[значение скрыто]'
     if ($Install -and !(Test-Path -LiteralPath $stateRoot)) {
         New-Item -ItemType Directory -Path $stateRoot -Force | Out-Null
     }
